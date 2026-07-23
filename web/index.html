@@ -347,9 +347,16 @@ async function ensurePako(){
                질의/문서 프리픽스 불필요(FlagEmbedding 공식 구현).
    - e5-small: 가볍고 빠름(품질은 약간 낮음). mean 풀링 + "query:"/"passage:" 프리픽스 필요.
    pooling·prefix 차이를 모델별 메타로 관리해 embed()가 모델에 맞게 동작하도록 한다. ===== */
+/* 모델마다 코사인 점수 '분포'가 크게 다르므로, 관련도 표시와 필터 임계치를 모델별로 보정한다.
+   (실측치 기반)
+   - bge-m3 : 무관 0.30~0.44 / 관련 0.55~0.70  → 분리도 큼(우수한 판별력)
+   - e5     : 무관 0.80~0.84 / 관련 0.86~0.90  → 전 구간 고득점(판별 폭이 좁음)
+   floor→0%, top→100%로 관련도(%)를 환산하고, gate=문맥 통과 하한, soft=키워드 강일치 시 완화 하한. */
 const MODELS = {
-  "bge-m3":   { id:"Xenova/bge-m3",                 label:"BGE-M3 (고품질·다국어)",              pooling:"cls",  q:"",        p:"" },
-  "e5-small": { id:"Xenova/multilingual-e5-small",  label:"multilingual-e5-small (빠름·가벼움)", pooling:"mean", q:"query: ", p:"passage: " },
+  "bge-m3":   { id:"Xenova/bge-m3",                 label:"BGE-M3 (고품질·다국어)",              pooling:"cls",  q:"",        p:"",
+                floor:0.40, top:0.62, gate:0.45, soft:0.38 },
+  "e5-small": { id:"Xenova/multilingual-e5-small",  label:"multilingual-e5-small (빠름·가벼움)", pooling:"mean", q:"query: ", p:"passage: ",
+                floor:0.80, top:0.90, gate:0.84, soft:0.81 },
 };
 // 기본값은 '빠른' 경량 모델. 브라우저 환경에서 BGE-M3는 무거워 대기가 길기 때문에
 // 기본은 e5-small(빠름·가벼움)로 두고, 고품질이 필요하면 상단에서 BGE-M3로 전환한다.
@@ -753,15 +760,39 @@ $("embedBtn").addEventListener("click",async()=>{
    ========================================================================= */
 const MARK_OPEN = '<mark style="background-color:#ffe066; color:#111; font-weight:bold;">';
 function escapeRegExp(s){ return s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&"); }
+
+/* 한국어 굴절(조사·어미) 대응 매칭:
+   검색어 토큰이 본문에 통짜로 없으면, 뒤에서 한 글자씩 떼며 '가장 긴 접두어'(최소 2글자)가
+   본문에 있는지 확인한다. 예) "음주운전하면" → 본문의 "음주운전"에 매칭.
+   반환값은 실제 본문에 존재하는 표면형(하이라이트/칩에 그대로 사용). 없으면 null. */
+function matchTokenToText(token, lowText){
+  const tl=token.toLowerCase();
+  if (lowText.includes(tl)) return token;
+  if (/[가-힣]/.test(token)){
+    for (let len=token.length-1; len>=2; len--){
+      const pre=token.slice(0,len);
+      if (lowText.includes(pre.toLowerCase())) return pre;
+    }
+  }
+  return null;
+}
+// 이 텍스트 안에서 실제로 매칭되는 검색어 표면형 집합(접두어 매칭 포함)
+function matchedForms(text, query){
+  const low=(text||"").toLowerCase();
+  const forms=new Set();
+  for (const t of significantTokens(query)){
+    const f=matchTokenToText(t, low);
+    if (f) forms.add(f);
+  }
+  return [...forms];
+}
 function highlight(text, query){
   const escaped = esc(text || "");
-  // 공백 기준 토큰화 → 1글자 이상만, 중복 제거, 긴 토큰 우선 정렬
-  const tokens = [...new Set((query||"").split(/\s+/).map(t=>t.trim()).filter(t=>t.length>=1))]
-    .sort((a,b)=>b.length-a.length)
-    .map(escapeRegExp);
-  if (!tokens.length) return escaped;
+  // 본문에 실제 존재하는 표면형만 골라(긴 것 우선) 하이라이트 → 굴절어도 정확 강조
+  const forms = matchedForms(text, query).sort((a,b)=>b.length-a.length).map(escapeRegExp);
+  if (!forms.length) return escaped;
   // (1) HTML 엔티티  (2) 키워드  — 엔티티를 앞에 두어 태그/엔티티 훼손을 원천 차단
-  const re = new RegExp("(&[#\\w]+;)|(" + tokens.join("|") + ")", "gi");
+  const re = new RegExp("(&[#\\w]+;)|(" + forms.join("|") + ")", "gi");
   return escaped.replace(re, (m, entity, kw) => entity ? entity : `${MARK_OPEN}${kw}</mark>`);
 }
 
@@ -822,31 +853,18 @@ function bm25(qtoks, idx){
 }
 
 /* =========================================================================
-   [요구사항 2] 문맥 기반 유사도 필터링 (Context-based Thresholding)
+   [요구사항 2] 문맥 기반 유사도 필터링 (모델별 보정)
    -------------------------------------------------------------------------
-   두 개의 상호보완적 임계치를 사용한다.
-
-   ① RAW_FLOOR (절대 임계치, 코사인 원점수)
-      - 질의와 무관한 문서를 '검색어별 문서 구성과 상관없이' 걸러내는 하드컷.
-      - BGE-M3(CLS 풀링, L2 정규화) 기준 관련 문서는 대개 0.5~0.7,
-        무관 문서는 0.3~0.45 부근에 형성 → 0.45를 기본 컷으로 둔다.
-      - 즉, 사용자가 고른 Top-K 안에 들더라도 이 값을 못 넘으면 렌더링에서 제외(Drop).
-
-   ② 보정 관련도(%) — 표시용
-      - 이 검색어에 대한 전체 문서 점수의 중앙값을 기준선으로 빼서,
-        '두드러지게 높은' 문서만 높은 %가 되도록 상대 보정한다.
-
-   결과가 하나도 임계치를 넘지 못하면 명확한 빈 상태(Empty State)를 노출한다.
+   코사인 점수 '분포'는 모델마다 크게 다르다(e5는 전 구간 0.80+로 몰리고, bge-m3는 넓게
+   분포). 따라서 고정 임계치/상대 중앙값 방식은 모델을 바꾸면 무너진다. 이를 해결하기 위해
+   관련도(%) 환산과 필터 임계치를 MODELS의 모델별 보정값(floor/top/gate/soft)으로 처리한다.
+   - 관련도(%) = clamp((cos - floor) / (top - floor)) × 100  → 문서가 1건이어도 안정적
+   - gate: 문맥 통과 하한(의미).  soft: 키워드 강일치 시 완화 하한(하이브리드).
+   임계치를 넘는 문서가 하나도 없으면 명확한 빈 상태(Empty State)를 노출한다.
    ========================================================================= */
-const RAW_FLOOR = 0.45;    // 코사인 원점수 절대 하한 (의미 문맥 컷 — 모델/도메인에 맞게 조정 가능)
-const SOFT_FLOOR = 0.38;  // 키워드가 강하게 일치할 때 허용하는 완화 하한(하이브리드 전용)
 const W_DENSE = 0.6, W_LEX = 0.4; // 하이브리드 융합 가중치(의미 60% + 키워드 40%)
-const MATCH_MARGIN = 0.12; // 기준선보다 이만큼 높으면 보정 관련도 100%
 let searchMode = "hybrid"; // hybrid | dense | lexical
-function median(arr){
-  const b=[...arr].sort((x,y)=>x-y); const m=b.length>>1;
-  return b.length ? (b.length%2 ? b[m] : (b[m-1]+b[m])/2) : 0;
-}
+const clamp01 = x => Math.max(0, Math.min(1, x));
 
 function renderEmptyState(box, note){
   box.innerHTML =
@@ -866,7 +884,6 @@ async function runSearch(){
     await ensureModel();
     if (!LEX) buildLexIndex();
     const qvec = await embed(q,true);
-    const sig   = significantTokens(q);   // 하이라이트/게이팅/칩용 중요 토큰
     const qtoks = lexTokens(q);           // BM25 매칭용 토큰(단어+bigram)
 
     // ── 1) 청크별 dense(의미)·lex(키워드) 점수 산출 ──────────────────
@@ -896,26 +913,27 @@ async function runSearch(){
     all.forEach(d=>{
       d.fused = W_DENSE*(d.dense/maxDd) + W_LEX*(d.lex/maxDl);
       d.lexN  = d.lex/maxDl;
-      const hay=(docTexts[d.source]||d.disp.it.text).toLowerCase();
-      d.kw = sig.filter(t=>hay.includes(t.toLowerCase())); // 본문에 그대로 존재하는 검색어
+      // 본문에 실제 존재하는 검색어(굴절어는 접두어로 매칭) → "음주운전하면"도 "음주운전"으로 잡음
+      const hayText = docTexts[d.source]||d.disp.it.text;
+      d.kw = matchedForms(hayText, q);
     });
 
-    // 표시용 보정 관련도(의미) — 검증된 기존 방식(중앙값 기준선) 유지
-    const baseline = all.length>=3 ? median(all.map(r=>r.dense)) : 0.75;
-    const matchPct = s => Math.round(Math.max(0,Math.min(1,(s-baseline)/MATCH_MARGIN))*100);
+    // 표시용 관련도(%) — 모델별 보정(floor→0%, top→100%). 문서 수와 무관하게 안정적.
+    const M = curModel();
+    const matchPct = s => Math.round(clamp01((s - M.floor)/(M.top - M.floor))*100);
 
-    // ── 3) 모드별 정렬 + 문맥 게이트 ────────────────────────────────
-    const strongLex = d => d.kw.length>0;   // 중요 키워드가 문서에 정확히 존재
+    // ── 3) 모드별 정렬 + 문맥 게이트(모델별 gate/soft) ─────────────────
+    const strongLex = d => d.kw.length>0;   // 중요 키워드가 문서에 (굴절 포함) 존재
     let pass;
     if (searchMode==="dense"){
       all.sort((a,b)=>b.dense-a.dense);
-      pass = d => d.dense>=RAW_FLOOR;                                   // 의미 임계치
+      pass = d => d.dense>=M.gate;                                   // 의미 임계치
     } else if (searchMode==="lexical"){
       all.sort((a,b)=>b.lex-a.lex);
-      pass = d => d.lex>0 && strongLex(d);                             // 정확 키워드 존재
+      pass = d => d.lex>0 && strongLex(d);                           // 정확/접두 키워드 존재
     } else { // hybrid: 의미가 충분하거나, 키워드 강일치 + 최소 의미 관련이면 통과
       all.sort((a,b)=>b.fused-a.fused);
-      pass = d => d.dense>=RAW_FLOOR || (strongLex(d) && d.dense>=SOFT_FLOOR);
+      pass = d => d.dense>=M.gate || (strongLex(d) && d.dense>=M.soft);
     }
 
     const topk = parseInt($("topk").value,10);
@@ -927,7 +945,7 @@ async function runSearch(){
     if (!ranked.length){
       renderEmptyState(box, searchMode==="lexical"
         ? "검색어와 정확히 일치하는 키워드가 문서에 없습니다."
-        : "가장 근접한 문서도 문맥 임계치(유사도 " + RAW_FLOOR.toFixed(2) + ")를 넘지 못했습니다.");
+        : "가장 근접한 문서도 문맥 임계치(유사도 " + M.gate.toFixed(2) + ")를 넘지 못했습니다.");
       return;
     }
 
