@@ -134,6 +134,20 @@
   .toggle{border:none;background:transparent;color:var(--brand);cursor:pointer;font-size:14px;
         padding:0 4px 0 0;line-height:1;font-weight:700}
 
+  /* ---- 검색 방식 세그먼트(하이브리드/의미/키워드) ---- */
+  .seg{display:inline-flex;border:1px solid var(--line-strong);border-radius:6px;overflow:hidden;margin-top:12px}
+  .seg button{border:none;border-radius:0;background:var(--card);color:var(--muted);
+        padding:8px 15px;font-weight:600;font-size:13px}
+  .seg button + button{border-left:1px solid var(--line)}
+  .seg button.on{background:var(--brand);color:#fff}
+  .seg button.on:hover{color:#fff}
+  .seg button:hover:not(.on){color:var(--brand)}
+
+  /* ---- 정확히 일치한 키워드 칩 ---- */
+  .kw{display:inline-block;font-size:11px;background:#fff7d6;color:#7a5b00;border:1px solid #f0d97a;
+      padding:1px 8px;border-radius:4px;margin:2px 4px 0 0;font-weight:700}
+  @media (prefers-color-scheme: dark){ .kw{background:#3a3210;color:#f0d97a;border-color:#5c4f1a} }
+
   /* ---- 하이라이트: 요구사항 지정 노란색. 인라인 스타일로도 강제하지만 폴백까지 통일 ---- */
   mark{background-color:var(--mark-bg);color:var(--mark-text);font-weight:bold;border-radius:3px;padding:0 2px}
 
@@ -163,7 +177,7 @@
 <div class="wrap">
   <p class="lead">
     설치 없이 브라우저 안에서만 동작하는 <b>로컬 RAG 검색</b>입니다. 파이썬·서버·API 키가 필요 없습니다.
-    문서를 넣어 <b>임베딩</b>한 뒤, 자연어로 <b>문맥 기반 의미 검색</b>을 하세요.
+    문서를 넣어 <b>임베딩</b>한 뒤, 자연어로 <b>하이브리드 검색</b>(의미 + 키워드)을 하세요.
     문서 내용은 브라우저 밖으로 전송되지 않습니다.
   </p>
 
@@ -228,9 +242,14 @@
       </select>
       <button class="primary" id="searchBtn" disabled>검색</button>
     </div>
+    <div class="seg" id="modeSeg" role="tablist" aria-label="검색 방식">
+      <button type="button" data-mode="hybrid" class="on" title="의미 + 키워드 융합(권장)">하이브리드</button>
+      <button type="button" data-mode="dense" title="임베딩 기반 의미검색만">의미검색</button>
+      <button type="button" data-mode="lexical" title="BM25 키워드 정확일치만">키워드</button>
+    </div>
     <p class="note" style="margin:10px 2px 0">
-      ⓘ 선택한 개수는 <b>상한</b>일 뿐입니다. <b>문맥상 관련이 낮은 문서는 자동으로 제외</b>되어,
-      실제 노출 건수는 더 적을 수 있습니다.
+      ⓘ <b>하이브리드</b>는 의미(임베딩)와 키워드(BM25 정확일치)를 함께 반영합니다.
+      선택한 개수는 <b>상한</b>일 뿐이며, <b>문맥상 관련이 낮은 문서는 자동으로 제외</b>됩니다.
     </p>
     <div id="results"></div>
   </div>
@@ -566,6 +585,7 @@ $("embedBtn").addEventListener("click",async()=>{
       $("embedStatus").textContent=`임베딩 중… ${i+1}/${jobs.length}`;
       $("embedStatus").className="note st-warn";
     }
+    buildLexIndex();  // 하이브리드용 BM25 키워드 색인 구축
     const unit = split ? `${index.length}개 조각` : `${index.length}개 문서(통째로)`;
     $("embedStatus").textContent=`완료 ✓ ${unit}를 임베딩했습니다. 이제 검색하세요.`;
     $("embedStatus").className="note st-ok";
@@ -606,14 +626,60 @@ function highlight(text, query){
   return escaped.replace(re, (m, entity, kw) => entity ? entity : `${MARK_OPEN}${kw}</mark>`);
 }
 
-// 모든 조각의 점수를 구한 뒤, 문서(파일)별로 묶어 "가장 관련 높은 구간" 하나만 남긴다.
-function groupByDocument(qvec){
-  const best={}; // source -> {source,score,it}
-  for (const it of index){
-    let dot=0; const v=it.vector; for (let i=0;i<v.length;i++) dot+=v[i]*qvec[i];
-    if (!best[it.source] || dot>best[it.source].score) best[it.source]={source:it.source,score:dot,it};
+// L2 정규화된 두 벡터의 내적 = 코사인 유사도
+function dot(a,b){ let d=0; for (let i=0;i<a.length;i++) d+=a[i]*b[i]; return d; }
+
+/* =========================================================================
+   [하이브리드 검색] 키워드(BM25) 색인 & 토크나이저
+   -------------------------------------------------------------------------
+   의미검색(dense)만으로는 '제74조', '케이티', '990,323' 같이 정확 일치가 중요한
+   법령/감사 용어를 놓칠 수 있다. 이를 BM25 키워드 매칭으로 보완한다.
+
+   브라우저에는 한국어 형태소 분석기가 없으므로 다음 전략으로 토큰화한다:
+   - 영문/숫자: 연속 문자열을 그대로 토큰화 → 조문번호·금액·고유명사 정확 매칭
+   - 한글    : 단어 전체 + 문자 bigram(2-gram)을 함께 토큰화
+               → 조사/어미 변형과 부분 일치("전용통신망" ⊃ "통신망")를 흡수
+   ========================================================================= */
+function lexTokens(text){
+  const toks=[]; const s=(text||"").toLowerCase();
+  const words=s.match(/[a-z0-9]+|[가-힣]+/g)||[];
+  for (const w of words){
+    if (/^[a-z0-9]+$/.test(w)){ toks.push(w); continue; }   // 영문·숫자 원형
+    if (w.length===1){ toks.push(w); continue; }             // 1글자 한글
+    toks.push(w);                                            // 단어 원형
+    for (let i=0;i<w.length-1;i++) toks.push(w.slice(i,i+2)); // 문자 bigram
   }
-  return Object.values(best).sort((a,b)=>b.score-a.score);
+  return toks;
+}
+// 하이라이트/게이팅용 '중요 토큰': 2글자 이상 또는 숫자·영문 포함(공백 분리)
+function significantTokens(query){
+  return [...new Set((query||"").split(/\s+/).map(t=>t.trim()).filter(Boolean))]
+    .filter(t => t.length>=2 || /[0-9a-zA-Z]/.test(t));
+}
+
+// index(청크 배열)로부터 BM25 통계 구축. 임베딩 완료/인덱스 로드 후 호출.
+let LEX=null; // {N, avgdl, df:Map<term,docCount>, docs:[{tf:Map,len}]}
+function buildLexIndex(){
+  const docsTf=[]; const df=new Map(); let total=0;
+  for (const it of index){
+    const toks=lexTokens(it.text); const tf=new Map();
+    for (const t of toks) tf.set(t,(tf.get(t)||0)+1);
+    for (const t of tf.keys()) df.set(t,(df.get(t)||0)+1);
+    docsTf.push({tf,len:toks.length}); total+=toks.length;
+  }
+  LEX={ N:index.length, avgdl: index.length? total/index.length : 0, df, docs:docsTf };
+}
+// BM25 점수(k1=1.2, b=0.75) — 질의 토큰 vs 특정 청크(idx)
+function bm25(qtoks, idx){
+  if (!LEX || !LEX.N) return 0;
+  const {tf,len}=LEX.docs[idx]; const k1=1.2, b=0.75; let s=0;
+  for (const t of qtoks){
+    const f=tf.get(t); if (!f) continue;
+    const n=LEX.df.get(t)||0;
+    const idf=Math.log(1+(LEX.N-n+0.5)/(n+0.5));    // 흔한 용어일수록 가중치 하락
+    s += idf * (f*(k1+1))/(f + k1*(1-b+b*len/(LEX.avgdl||1)));
+  }
+  return s;
 }
 
 /* =========================================================================
@@ -633,8 +699,11 @@ function groupByDocument(qvec){
 
    결과가 하나도 임계치를 넘지 못하면 명확한 빈 상태(Empty State)를 노출한다.
    ========================================================================= */
-const RAW_FLOOR = 0.45;   // 코사인 원점수 절대 하한 (문맥 무관 문서 컷 — 모델/도메인에 맞게 조정 가능)
+const RAW_FLOOR = 0.45;    // 코사인 원점수 절대 하한 (의미 문맥 컷 — 모델/도메인에 맞게 조정 가능)
+const SOFT_FLOOR = 0.38;  // 키워드가 강하게 일치할 때 허용하는 완화 하한(하이브리드 전용)
+const W_DENSE = 0.6, W_LEX = 0.4; // 하이브리드 융합 가중치(의미 60% + 키워드 40%)
 const MATCH_MARGIN = 0.12; // 기준선보다 이만큼 높으면 보정 관련도 100%
+let searchMode = "hybrid"; // hybrid | dense | lexical
 function median(arr){
   const b=[...arr].sort((x,y)=>x-y); const m=b.length>>1;
   return b.length ? (b.length%2 ? b[m] : (b[m-1]+b[m])/2) : 0;
@@ -656,51 +725,100 @@ async function runSearch(){
   const box=$("results");
   try{
     await ensureModel();
-    const qvec=await embed(q);
-    const all=groupByDocument(qvec);                 // 전체 문서(코사인 원점수 내림차순)
+    if (!LEX) buildLexIndex();
+    const qvec = await embed(q);
+    const sig   = significantTokens(q);   // 하이라이트/게이팅/칩용 중요 토큰
+    const qtoks = lexTokens(q);           // BM25 매칭용 토큰(단어+bigram)
 
-    // 표시용 보정 관련도 계산 (상대 기준선)
-    const baseline = all.length>=3 ? median(all.map(r=>r.score)) : 0.75;
+    // ── 1) 청크별 dense(의미)·lex(키워드) 점수 산출 ──────────────────
+    const chunk = index.map((it,idx)=>({
+      it, dense: dot(qvec,it.vector), lex: bm25(qtoks,idx)
+    }));
+    // 서로 스케일이 다른 두 점수를 [0,1]로 정규화(이 질의 내 최댓값 기준)
+    const maxCd = Math.max(1e-9, ...chunk.map(c=>c.dense));
+    const maxCl = Math.max(1e-9, ...chunk.map(c=>c.lex));
+    chunk.forEach(c=>{ c.fused = W_DENSE*(c.dense/maxCd) + W_LEX*(c.lex/maxCl); });
+
+    // ── 2) 문서(파일) 단위로 묶기. 표시 구간은 '현재 모드의 최고 점수' 청크 ─
+    const scoreOf = c => searchMode==="lexical" ? c.lex : searchMode==="dense" ? c.dense : c.fused;
+    const byDoc = new Map();
+    for (const c of chunk){
+      const g = byDoc.get(c.it.source);
+      if (!g){ byDoc.set(c.it.source,{source:c.it.source,dense:c.dense,lex:c.lex,disp:c}); continue; }
+      if (c.dense>g.dense) g.dense=c.dense;
+      if (c.lex>g.lex)     g.lex=c.lex;
+      if (scoreOf(c)>scoreOf(g.disp)) g.disp=c;
+    }
+    let all=[...byDoc.values()];
+
+    // 문서 단위 정규화 → 융합 점수 + 정확일치 키워드 목록(kw)
+    const maxDd=Math.max(1e-9,...all.map(d=>d.dense));
+    const maxDl=Math.max(1e-9,...all.map(d=>d.lex));
+    all.forEach(d=>{
+      d.fused = W_DENSE*(d.dense/maxDd) + W_LEX*(d.lex/maxDl);
+      d.lexN  = d.lex/maxDl;
+      const hay=(docTexts[d.source]||d.disp.it.text).toLowerCase();
+      d.kw = sig.filter(t=>hay.includes(t.toLowerCase())); // 본문에 그대로 존재하는 검색어
+    });
+
+    // 표시용 보정 관련도(의미) — 검증된 기존 방식(중앙값 기준선) 유지
+    const baseline = all.length>=3 ? median(all.map(r=>r.dense)) : 0.75;
     const matchPct = s => Math.round(Math.max(0,Math.min(1,(s-baseline)/MATCH_MARGIN))*100);
 
-    // ── 핵심 필터링 ──────────────────────────────────────────────
-    // 1) 사용자가 고른 Top-K로 상한을 잡고
-    // 2) 그 안에서 코사인 원점수가 RAW_FLOOR를 넘는 '문맥상 진짜 연관' 문서만 남긴다.
-    const topk   = parseInt($("topk").value,10);
-    const capped = all.slice(0, topk);
-    const ranked = capped.filter(r => r.score >= RAW_FLOOR);
-    const dropped = capped.length - ranked.length;   // 임계치 미달로 제외된 건수
+    // ── 3) 모드별 정렬 + 문맥 게이트 ────────────────────────────────
+    const strongLex = d => d.kw.length>0;   // 중요 키워드가 문서에 정확히 존재
+    let pass;
+    if (searchMode==="dense"){
+      all.sort((a,b)=>b.dense-a.dense);
+      pass = d => d.dense>=RAW_FLOOR;                                   // 의미 임계치
+    } else if (searchMode==="lexical"){
+      all.sort((a,b)=>b.lex-a.lex);
+      pass = d => d.lex>0 && strongLex(d);                             // 정확 키워드 존재
+    } else { // hybrid: 의미가 충분하거나, 키워드 강일치 + 최소 의미 관련이면 통과
+      all.sort((a,b)=>b.fused-a.fused);
+      pass = d => d.dense>=RAW_FLOOR || (strongLex(d) && d.dense>=SOFT_FLOOR);
+    }
+
+    const topk = parseInt($("topk").value,10);
+    const relevant = all.filter(pass);
+    const ranked   = relevant.slice(0, topk);
+    const dropped  = all.length - relevant.length;   // 임계치 미달로 제외된 문서 수
 
     box.innerHTML="";
-
-    // 임계치를 넘는 문서가 하나도 없으면 → 빈 상태
     if (!ranked.length){
-      renderEmptyState(box,
-        "가장 근접한 문서도 문맥 임계치(유사도 " + RAW_FLOOR.toFixed(2) + ")를 넘지 못했습니다.");
+      renderEmptyState(box, searchMode==="lexical"
+        ? "검색어와 정확히 일치하는 키워드가 문서에 없습니다."
+        : "가장 근접한 문서도 문맥 임계치(유사도 " + RAW_FLOOR.toFixed(2) + ")를 넘지 못했습니다.");
       return;
     }
 
-    // 결과 요약(law.go.kr 톤의 메타 안내)
-    let meta =
-      '💡 <b>' + ranked.length + '건</b>이 문맥 임계치를 통과했습니다'
-      + (dropped>0 ? ' (관련도 낮은 <b>' + dropped + '건</b>은 자동 제외).' : '.')
-      + ' <mark style="background-color:#ffe066;color:#111;font-weight:bold;">노란색</mark>은 검색어 위치,'
-      + ' 오른쪽 <b>▸</b>는 본문 전체 보기입니다.';
-    box.insertAdjacentHTML("beforeend", '<div class="res-meta">' + meta + '</div>');
+    const modeLabel = searchMode==="dense" ? "의미검색"
+                    : searchMode==="lexical" ? "키워드검색" : "하이브리드(의미+키워드)";
+    box.insertAdjacentHTML("beforeend",
+      '<div class="res-meta">🔍 <b>' + modeLabel + '</b> · <b>' + ranked.length + '건</b> 통과'
+      + (dropped>0 ? ' (관련도 낮은 <b>' + dropped + '건</b> 자동 제외)' : '')
+      + '. <mark style="background-color:#ffe066;color:#111;font-weight:bold;">노란색</mark>은 검색어 위치, '
+      + '<span class="kw">키워드칩</span>은 정확히 일치한 용어입니다.</div>');
 
-    ranked.forEach((r,i)=>{
-      const it=r.it;
+    ranked.forEach((d,i)=>{
+      const it=d.disp.it;
       const chunkLabel = it.nChunks>1 ? `관련 구간 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
-      const pct=matchPct(r.score);
+      // 관련도 표기: 키워드 모드는 키워드 점수%, 그 외는 의미 보정 관련도%
+      const pct = searchMode==="lexical" ? Math.round(d.lexN*100) : matchPct(d.dense);
+      const pctLabel = (searchMode==="lexical" ? "키워드 " : "관련도 ") + pct + "%";
       const full=(docTexts[it.source]||it.text);
       const preview=it.text.length>240?it.text.slice(0,240)+"…":it.text;
+      const kwChips = d.kw.length
+        ? '<div style="margin:2px 0 4px">' + d.kw.map(t=>`<span class="kw">🔤 ${esc(t)}</span>`).join("") + '</div>'
+        : '';
       const div=document.createElement("div"); div.className="res";
       div.innerHTML=
         `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
-        + `<b>[${i+1}] ${esc(it.source)}</b> <span class="chip" title="문서 안에서 검색어와 가장 관련 높은 구간입니다">${chunkLabel}</span></span>`
-        + `<span class="score"><span class="pct">관련도 ${pct}%</span>`
-        + `<span class="raw">유사도 ${(r.score*100).toFixed(1)}%</span></span></h4>`
+        + `<b>[${i+1}] ${esc(it.source)}</b> <span class="chip" title="문서 안에서 가장 관련 높은 구간입니다">${chunkLabel}</span></span>`
+        + `<span class="score"><span class="pct">${pctLabel}</span>`
+        + `<span class="raw">의미 ${(d.dense*100).toFixed(1)}%${d.kw.length?` · 키워드 ${d.kw.length}개`:""}</span></span></h4>`
         + `<div class="relbar"><i style="width:${pct}%"></i></div>`
+        + kwChips
         + `<p class="preview">${highlight(preview,q)}</p>`
         + `<div class="fulltext" style="display:none">${highlight(full,q)}</div>`;
       const btn=div.querySelector(".toggle");
@@ -722,6 +840,16 @@ async function runSearch(){
 $("searchBtn").addEventListener("click",runSearch);
 $("q").addEventListener("keydown",e=>{ if (e.key==="Enter") runSearch(); });
 
+// 검색 방식(하이브리드/의미/키워드) 전환 — 선택 즉시 재검색
+document.querySelectorAll("#modeSeg button").forEach(btn=>{
+  btn.addEventListener("click",()=>{
+    document.querySelectorAll("#modeSeg button").forEach(b=>b.classList.remove("on"));
+    btn.classList.add("on");
+    searchMode=btn.dataset.mode;
+    if ($("q").value.trim() && index.length) runSearch();
+  });
+});
+
 /* ---- 인덱스 저장/불러오기 ---- */
 $("saveIndex").addEventListener("click",()=>{
   const data={model:MODEL_ID, docTexts,
@@ -736,6 +864,7 @@ $("indexFile").addEventListener("change",async e=>{
   const data=JSON.parse(await f.text());
   index=data.items.map(it=>({...it,vector:Float32Array.from(it.vector)}));
   docTexts=data.docTexts||{};
+  buildLexIndex();  // 하이브리드용 BM25 키워드 색인 재구축
   $("searchBtn").disabled=false; $("saveIndex").disabled=false;
   let msg=`인덱스 불러옴 ✓ ${index.length}개 조각. 바로 검색할 수 있습니다.`;
   // 다른 모델로 만든 인덱스는 벡터 공간이 달라 검색 품질이 떨어질 수 있음을 안내
