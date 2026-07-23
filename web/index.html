@@ -268,10 +268,9 @@
   </p>
 </div>
 
-<!-- 외부 라이브러리 (전역) -->
-<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+<!-- 외부 라이브러리는 아래 스크립트에서 '필요할 때' 동적으로 로드합니다
+     (pdf.js·JSZip·pako). htmlpreview 등에서 정적 <script>가 실행되지 않아
+     발생하던 'pdfjsLib is not defined' 오류를 방지합니다. -->
 
 <!-- 내장 샘플 문서 (파일 없이 바로 검색 체험용) -->
 <script type="application/json" id="samples">
@@ -297,9 +296,49 @@
 
 <script>
 "use strict";
-if (window.pdfjsLib) {
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+
+/* =========================================================================
+   [안정성] 외부 라이브러리 지연 로드
+   -------------------------------------------------------------------------
+   문제: 일부 환경(htmlpreview 등)에서는 <head>/<body>의 정적 <script src>가
+        제때 실행되지 않아 pdfjsLib/JSZip/pako가 undefined가 되고
+        "pdfjsLib is not defined" 오류로 문서 추출이 실패한다.
+   해결: 각 라이브러리를 '실제로 필요한 순간'에 동적으로 주입해 보장하고,
+        실패 시 명확한 한국어 오류를 던진다(정적 로드 성공 시에는 즉시 재사용).
+   ========================================================================= */
+const CDN = {
+  pdf:  "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js",
+  pdfw: "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js",
+  jszip:"https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
+  pako: "https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js",
+};
+const _scriptCache={};
+function loadScript(src){
+  if (_scriptCache[src]) return _scriptCache[src];
+  _scriptCache[src]=new Promise((resolve,reject)=>{
+    const s=document.createElement("script");
+    s.src=src; s.async=true;
+    s.onload=()=>resolve();
+    s.onerror=()=>reject(new Error("라이브러리 로드 실패(네트워크/CDN 확인): "+src));
+    document.head.appendChild(s);
+  });
+  return _scriptCache[src];
+}
+async function ensurePdfjs(){
+  if (!window.pdfjsLib) await loadScript(CDN.pdf);
+  if (!window.pdfjsLib) throw new Error("pdf.js를 불러오지 못했습니다.");
+  try{ window.pdfjsLib.GlobalWorkerOptions.workerSrc=CDN.pdfw; }catch(_){}
+  return window.pdfjsLib;
+}
+async function ensureJSZip(){
+  if (!window.JSZip) await loadScript(CDN.jszip);
+  if (!window.JSZip) throw new Error("JSZip을 불러오지 못했습니다.");
+  return window.JSZip;
+}
+async function ensurePako(){
+  if (!window.pako) await loadScript(CDN.pako);
+  if (!window.pako) throw new Error("pako를 불러오지 못했습니다.");
+  return window.pako;
 }
 
 /* ===== 임베딩 모델 설정 ============================================================
@@ -330,9 +369,10 @@ const $ = (id) => document.getElementById(id);
 /* ================= 텍스트 추출 ================= */
 async function extractText(name, buf /* ArrayBuffer */) {
   const ext = (name.split(".").pop() || "").toLowerCase();
-  if (ext === "pdf")  return tidy(await extractPdf(buf));
-  if (ext === "hwpx") return tidy(await extractHwpx(buf));
-  if (ext === "hwp")  return tidy(extractHwp(new Uint8Array(buf)));
+  // 형식별로 필요한 외부 라이브러리를 '이 시점에' 보장한 뒤 추출
+  if (ext === "pdf")  { await ensurePdfjs(); return tidy(await extractPdf(buf)); }
+  if (ext === "hwpx") { await ensureJSZip(); return tidy(await extractHwpx(buf)); }
+  if (ext === "hwp")  { await ensurePako();  return tidy(extractHwp(new Uint8Array(buf))); }
   if (ext === "txt" || ext === "md") return tidy(new TextDecoder("utf-8").decode(buf));
   throw new Error("지원하지 않는 형식: ." + ext);
 }
