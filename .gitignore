@@ -1,0 +1,14 @@
+# 비밀 값
+.env
+
+# 파이썬 가상환경 / 캐시
+.venv/
+__pycache__/
+*.pyc
+
+# 생성된 인덱스(임베딩 결과)
+index/*.npz
+
+# OS
+.DS_Store
+Thumbs.db
