@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>감사문서 임베딩 검색 (설치 불필요)</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#fff; --text:#1c1f23; --muted:#6b7280; --line:#e5e7eb;
+    --brand:#2563eb; --brand-weak:#eff4ff; --ok:#16a34a; --warn:#b45309; --err:#dc2626;
+    --chip:#eef2f7;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1115; --card:#171a20; --text:#e6e8eb; --muted:#9aa3af; --line:#272b33;
+      --brand:#5b9dff; --brand-weak:#16203a; --ok:#4ade80; --warn:#fbbf24; --err:#f87171;
+      --chip:#232833;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI","Malgun Gothic","Apple SD Gothic Neo",system-ui,sans-serif;
+       background:var(--bg);color:var(--text);line-height:1.55}
+  .wrap{max-width:860px;margin:0 auto;padding:28px 18px 64px}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:14px;margin:0 0 22px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0}
+  .step{font-size:12px;font-weight:700;color:var(--brand);letter-spacing:.04em;text-transform:uppercase;margin:0 0 8px}
+  .drop{border:2px dashed var(--line);border-radius:12px;padding:26px;text-align:center;color:var(--muted);
+        cursor:pointer;transition:.15s}
+  .drop:hover,.drop.over{border-color:var(--brand);background:var(--brand-weak);color:var(--text)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--text);
+         padding:9px 14px;border-radius:9px;cursor:pointer}
+  button:hover{border-color:var(--brand)}
+  button.primary{background:var(--brand);border-color:var(--brand);color:#fff;font-weight:600}
+  button.primary:disabled{opacity:.5;cursor:not-allowed}
+  button.ghost{background:transparent}
+  input[type=text],select{font:inherit;background:var(--card);color:var(--text);
+         border:1px solid var(--line);border-radius:9px;padding:9px 11px}
+  input[type=text]{flex:1;min-width:200px}
+  table{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600}
+  .chip{display:inline-block;font-size:11px;background:var(--chip);color:var(--muted);
+        padding:2px 8px;border-radius:999px}
+  .st-ok{color:var(--ok)} .st-warn{color:var(--warn)} .st-err{color:var(--err)} .st-muted{color:var(--muted)}
+  .bar{height:8px;background:var(--chip);border-radius:999px;overflow:hidden;margin-top:10px}
+  .bar > i{display:block;height:100%;width:0;background:var(--brand);transition:width .2s}
+  .res{border:1px solid var(--line);border-radius:11px;padding:12px 14px;margin:10px 0;background:var(--card)}
+  .res h4{margin:0 0 4px;font-size:14px;display:flex;justify-content:space-between;gap:10px}
+  .res .score{color:var(--brand);font-variant-numeric:tabular-nums}
+  .res p{margin:6px 0 0;font-size:13px;color:var(--muted);white-space:pre-wrap}
+  .note{font-size:12px;color:var(--muted)}
+  code{background:var(--chip);padding:1px 6px;border-radius:6px;font-size:12px}
+  a{color:var(--brand)}
+  hr{border:none;border-top:1px solid var(--line);margin:22px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔎 감사문서 임베딩 검색</h1>
+  <p class="sub">설치 없이 브라우저에서만 동작합니다. 파이썬·서버·API 키가 필요 없습니다.
+     문서를 넣고 <b>임베딩</b>한 뒤 자연어로 <b>의미 검색</b>하세요.</p>
+
+  <!-- 모델 상태 -->
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <div>
+        <div class="step">임베딩 모델</div>
+        <div id="modelName">Xenova/multilingual-e5-small (다국어·한국어)</div>
+        <div id="modelStatus" class="note st-muted">아직 로드되지 않음 — 임베딩 시작 시 자동으로 내려받아 브라우저에 캐시됩니다(최초 1회, 인터넷 필요).</div>
+      </div>
+    </div>
+    <div class="bar" id="modelBarWrap" style="display:none"><i id="modelBar"></i></div>
+  </div>
+
+  <!-- 1. 문서 입력 -->
+  <div class="card">
+    <div class="step">① 문서 넣기</div>
+    <div id="drop" class="drop">
+      여기로 파일을 <b>드래그</b>하거나 클릭해서 선택<br />
+      <span class="note">지원: PDF · HWP · HWPX · TXT · MD</span>
+    </div>
+    <input id="file" type="file" multiple accept=".pdf,.hwp,.hwpx,.txt,.md" style="display:none" />
+    <div class="row" style="margin-top:12px">
+      <button class="ghost" id="loadSamples">샘플 감사문서 4건 불러오기</button>
+      <button class="ghost" id="clearDocs">목록 비우기</button>
+    </div>
+    <table id="docTable" style="display:none">
+      <thead><tr><th>문서</th><th>형식</th><th>글자수</th><th>상태</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <!-- 2. 임베딩 -->
+  <div class="card">
+    <div class="step">② 임베딩</div>
+    <div class="row">
+      <button class="primary" id="embedBtn" disabled>임베딩 시작</button>
+      <span id="embedStatus" class="note st-muted">문서를 먼저 넣으세요.</span>
+    </div>
+    <div class="bar" id="embedBarWrap" style="display:none"><i id="embedBar"></i></div>
+    <div class="row" style="margin-top:12px">
+      <button class="ghost" id="saveIndex" disabled>인덱스 저장(.json)</button>
+      <button class="ghost" id="loadIndexBtn">인덱스 불러오기</button>
+      <input id="indexFile" type="file" accept=".json" style="display:none" />
+    </div>
+  </div>
+
+  <!-- 3. 검색 -->
+  <div class="card">
+    <div class="step">③ 검색</div>
+    <div class="row">
+      <input id="q" type="text" placeholder="예) 임산부 시간외근로 승인 / 전용통신망 수의계약 / 방만경영 예산통제" />
+      <select id="topk">
+        <option value="3">상위 3</option>
+        <option value="5" selected>상위 5</option>
+        <option value="10">상위 10</option>
+      </select>
+      <button class="primary" id="searchBtn" disabled>검색</button>
+    </div>
+    <div id="results"></div>
+  </div>
+
+  <hr />
+  <p class="note">
+    ⓘ 이 페이지는 <b>완전히 로컬</b>에서 실행됩니다. 문서 내용은 브라우저 밖으로 전송되지 않습니다.
+    임베딩 모델과 라이브러리는 최초 실행 시 CDN에서 내려받으며(인터넷 필요), 이후 브라우저 캐시로 재사용됩니다.<br />
+    라이브러리: transformers.js · pdf.js · JSZip · pako &nbsp;|&nbsp; HWP(바이너리)는 이 페이지에 내장된 파서로 직접 추출합니다.
+  </p>
+</div>
+
+<!-- 외부 라이브러리 (전역) -->
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+
+<!-- 내장 샘플 문서 (파일 없이 바로 검색 체험용) -->
+<script type="application/json" id="samples">
+[
+{
+"name": "2021_성과감사결과보고서_SR.pdf",
+"text": "성과감사\n- 방만경영 위험요소 사전차단을 위한 -\n2021년도 성과감사 결과보고서\n2021. 12.\n주식회사 에스알\n(감사실)\n성과감사 결과\n1. 감사배경 및 목적\n◦방만경영 위험요소를 사전에 차단하여 방만경영 예방 및 경영의 \n투명성 제고\n2. 대상 및 범위\n◦감사대상 : 전 부서\n◦감사범위 : 예산통제, 복리후생 등\n3. 기간 및 인원\n◦감사기간 : ‘21. 12. ××. ∼‘21. 12. ××.\n＊기간 중 X일간\n◦감사인원 : 감사실장 등 5명 \n4. 감사 중점사항 \n◦출장 심사 및 사후관리 적정성 등 허술한 예산통제 분야\n◦경조금 등의 복리후생 분야\n5. 감사결과 총괄  \n(단위 : 건, 명)\n합 계\n변상\n명령\n징계\n시정\n경고·주의\n개선\n권고\n통 보\n고발\n수사\n요청\n현지\n조치\n건수\n금액\n인원\n개인기관\n5\n-\n-\n-\n-\n3\n-\n-\n-\n-\n2\n-\n-\n-\n6. 감사결과 주요 내용\n열차지연배상 절차개선에 관한 사항\n○▲▲처는 열차지연배상에 대하여 신용결제 환급절차 개선을 하였으나\n현금결제 지연배상 지급절차에 대한 추가개선이 필요하여 “통보” 조치 \n특근매식비 출장비 사용에 관한 사항\n○특근매식비 신청시 해당 근무실적이 발견되지 않는 등의 특근매식비\n오신청사항이발견되어 ○○부서“시정” 조치 \n출장비 사용에 관한 사항\n○출장비 신청시 불필요 교통사항 이용등의 오청구사항이발견되어 \n■■부서“시정” 조치 \n할인증 사용에 관한 사항\n○사용제한 기간 이용 등의 할인증 오사용 내역에 대하여 ◇◇부서\n“시정” 조치 \n할인증 사용절차 개선에 관한 사항\n○할인증 제한 등의 시스템 개선등이 필요하여 관련 시스템 개선등 \n♡♡부서 “통보” 조치 \n7. 모범사례\n1 열차지연배상 제도개선 및 지연배상률 향상으로 국민권익신장에 기여\n○신용결제 자동환급 등의 열차지연배상 제도를 개선하여 지연배상 \n지급률을 기존 60%에서 95%로 대폭 향상하여 국민권익신장에 기여\n▷♣♣본부\n▲▲처\n과장\n4급\n♠♠♠\n[모범사례]"
+},
+{
+"name": "2021_처분요구서_일상감사미시행.hwp",
+"text": "[처분요구서 16번]\n\n상 임 감 사 위 원\n\n통 보\n\n제 목 설비 점검 중 재해발생 관련 일상감사 미시행\n\n관 계 부 서 ○○○○ ◉◉◉\n\n내 용\n\n1. 업무 개요\n\n우리공사는「일상감사시행세칙」에 따라 주요 업무 등에 대하여 최종 결재권자의 결재에 앞서 그 업무의 적법성·타당성 등을 점검·심사하기 위하여 일상감사를 시행하고 있다.\n\n2020.11.1.부터 2021.10.31.까지 ○○○○의 일상감사 수감현황은 31건이며 대상기간 동안 내부결재문서를 대상으로 일상감사 시행의 적정성을 점검하였다.\n\n2. 관계규정 및 판단기준\n\n「일상감사시행세칙」제4조(일상감사 실시원칙), 제5조(일상감사 대상업무), 제6조(일상감사 시기) 및 제11조(일상감사 의견의 이행)에 따라 일상감사 업무범위에 속하는 대상업무에 대하여 집행부서의 장은 최종 결재권자(전결권자를 포함한다)의 결재 전에 일상감사를 실시할 수 있도록 일상감사 실시기간을 고려하여 감사실로 일상감사를 의뢰하여야 하며, 최종 결재권자의 결재를 받을 때 일상감사 의견서와 그 조치결과를 첨부하여야 한다.\n\n3. 감사결과 확인된 문제점\n\n그런데, ○○○○의 2020.11.1.부터 2021.10.31.까지 내부결재문서를 대상으로「일상감사시행세칙」에 따라 일상감사 시행의 적정성을 점검한 결과, 일상감사 대상업무임에도 불구하고 미수감한 사례가 [표21]과 같이 *건 발견되었다.\n\n[표21] 일상감사 미수감 현황\n\n부서명\n\n등록일자\n\n문서\n\n번호\n\n문서제목\n\n최종\n\n결재권자\n\n일상감사 대상여부\n\n판단기준\n\n○○○○ ◉◉◉\n\n2021.10.15.\n\n****\n\n○○○○ 원수탱크 설비 점검 중 재해발생 관련 재해조사보고서 송부\n\n부장\n\n3.2.2. 산업재해 및 사고조사 결과보고\n\n○○○○ ◉◉◉는 사전 예방 감사의 실효성 확보와 업무의 신뢰성 제고를 위하여, 상기 사례가 재발하지 않도록 「일상감사시행세칙」을 철저히 준수할 필요가 있다.\n\n관계부서 의견\n\n○○○○ ◉◉◉는「일상감사시행세칙」을 명확히 숙지하지 못하였으며, 금번 감사를 통해 「일상감사시행세칙」을 명확히 인지하였고 앞으로는 일상감사 업무절차를 철저히 준수하겠다는 의견을 제시하였다.\n\n조치할 사항\n\n[통보] ○○○○장은 일상감사 미수감 사례가 재발하지 않도록「일상감사시행세칙」을 철저히 준수하여 주시기 바랍니다. (처리할 부서 : ○○○○ ◉◉◉)"
+},
+{
+"name": "2023_지적사항_임산부시간외근로.hwp",
+"text": "3) 임산부 시간외근로 부적정\n\n「근로기준법」제74조제7항에 따르면 임신 후 12주 이내 또는 36주 이후에 있는 여성 근로자에게 1일 2시간의 근로시간 단축 근무를 허용함으로써 임산부 근로자를 보호하고 있으며, 같은 법 제74조제5항에 따라 임신 중의 여성 근로자에게 시간외근로를 하게 하여서는 아니 된다.\n\n그러나 총무과 인사팀은 근로기준법 준수를 위해 임신기 근로시간 단축근무 및 시간외근로의 관리·감독을 철저히 해야 함에도, 임신기 근로시간 단축근무 중이었던 ○○○ 외 4명의 시간외근로 신청 10건(51시간)을 승인하였다.\n\n[표 20] 임신기 근로시간 단축근무 중 시간외근로 신청 내역\n\n부서\n\n사번\n\n이름\n\n단축근무\n\n시간외 근무\n\n시간\n\n사유\n\n시작일자\n\n종료일자\n\n시작일자\n\n종료일자\n\n○○○\n\n○○○○○\n\n○○○\n\n2020-07-01\n\n2020-07-15\n\n2020-07-01 07:30\n\n2020-07-01 08:00\n\n0.5\n\n○○○○○ ○○\n\n○○○○\n\n○○○\n\n○○○○○\n\n○○○\n\n2021-03-15\n\n2021-04-27\n\n2021-03-21 08:00\n\n2021-03-21 17:00\n\n9\n\n○○ ○○○○○○\n\n○ ○○\n\n○○○○○\n\n○○○\n\n2021-05-10\n\n2021-06-26\n\n2021-06-19 07:30\n\n2021-06-19 09:30\n\n2\n\n○○○○○ ○○\n\n○○○○○\n\n○○○\n\n2021-10-14\n\n2021-10-31\n\n2021-10-14 07:30\n\n2021-10-14 08:00\n\n0.5\n\n○○○○○ ○○○\n\n○○ ○○○○\n\n○○○○○\n\n○○○\n\n2023-03-09\n\n2023-04-27\n\n2023-03-12 08:00\n\n2023-03-12 12:00\n\n4\n\n○○ ○○○○\n\n○○ ○ ○○\n\n2023-03-25 08:00\n\n2023-03-25 17:00\n\n9\n\n〃\n\n○○○○○\n\n○○○\n\n2023-10-05\n\n2023-11-23\n\n2023-10-07 08:00\n\n2023-10-07 17:00\n\n9\n\n〃\n\n2023-10-08 08:00\n\n2023-10-08 12:00\n\n4\n\n〃\n\n2023-10-09 08:00\n\n2023-10-09 12:00\n\n4\n\n〃\n\n2023-10-14 08:00\n\n2023-10-14 17:00\n\n9\n\n〃\n\n<조치할 사항>\n\n【경고】 앞으로 「근로기준법」을 준수하여 임신 중의 여성 근로자가 시간외근로를 하지 않도록 관리를 철저히 하기 바랍니다.\n\n【관련자】 ○○ ○급 ○○○(현 ○○○○○), ○○○"
+},
+{
+"name": "2023_지적사항_전용통신망계약관리.hwpx",
+"text": "( 03 )\n\n시정ㆍ주의요구\n\n제 목 전용통신망 계약관리 업무 부적정\n\n<조치할 사항> ○○본부장은\n① ㈜케이티에게 과다 지급한 전용통신 요금 990,323원을 환수하고 사용하지 않는 통신장비 2기는 조속히 반납하여 장비임대료가 청구되지 않도록 하고(시정)\n② 앞으로 수의계약 사유에 해당되지 않는 전용통신망 이용 계약을 경쟁입찰 없이 수의로 계약을 체결하는 일이 없도록 하며, 이용요금이 적정하게 청구되었는지 확인하지 않거나 불필요한 임대장비를 반납하지 않고 이용요금을 계속 지급하는 일이 없도록 전용통신망 관리업무를 철저히 하시기 바랍니다.(주의)"
+}
+]
+</script>
+
+<script>
+"use strict";
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+}
+
+/* ================= 상태 ================= */
+const docs = [];      // {name, ext, text, status}
+let index = [];       // {source, chunk, text, vector:Float32Array}
+let extractor = null; // transformers.js 파이프라인
+
+const $ = (id) => document.getElementById(id);
+
+/* ================= 텍스트 추출 ================= */
+async function extractText(name, buf /* ArrayBuffer */) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (ext === "pdf")  return tidy(await extractPdf(buf));
+  if (ext === "hwpx") return tidy(await extractHwpx(buf));
+  if (ext === "hwp")  return tidy(extractHwp(new Uint8Array(buf)));
+  if (ext === "txt" || ext === "md") return tidy(new TextDecoder("utf-8").decode(buf));
+  throw new Error("지원하지 않는 형식: ." + ext);
+}
+
+async function extractPdf(buf) {
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let out = "";
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const c = await page.getTextContent();
+    out += c.items.map((i) => i.str).join(" ") + "\n";
+  }
+  return out;
+}
+
+async function extractHwpx(buf) {
+  const zip = await JSZip.loadAsync(buf);
+  const names = Object.keys(zip.files)
+    .filter((n) => /^Contents\/section\d+\.xml$/.test(n)).sort();
+  let out = "";
+  if (!names.length) {
+    const prev = zip.file("Preview/PrvText.txt");
+    return prev ? await prev.async("string") : "";
+  }
+  for (const n of names) {
+    const xml = await zip.file(n).async("string");
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const walk = (el) => {
+      for (const ch of el.childNodes) {
+        if (ch.nodeType === 1) {
+          if (ch.localName === "t") out += ch.textContent;
+          else if (ch.localName === "lineBreak" || ch.localName === "p") { walk(ch); out += "\n"; }
+          else walk(ch);
+        }
+      }
+    };
+    walk(doc.documentElement);
+    out += "\n";
+  }
+  return out;
+}
+
+/* ---- HWP 5.x (OLE 복합파일 + PARA_TEXT) : 순수 JS 구현 ---- */
+const CHAR_CTRL = new Set([0,10,13,24,25,26,27,28,29,30,31]);
+const INLINE_CTRL = new Set([4,5,6,7,8,9,19,20]);
+const EXT_CTRL = new Set([1,2,3,11,12,14,15,16,17,18,21,22,23]);
+const u32 = (u8, p) => (u8[p] | (u8[p+1]<<8) | (u8[p+2]<<16) | (u8[p+3]<<24)) >>> 0;
+const u16 = (u8, p) => u8[p] | (u8[p+1]<<8);
+function u8concat(list){
+  let len = 0; for (const a of list) len += a.length;
+  const out = new Uint8Array(len); let o = 0;
+  for (const a of list){ out.set(a, o); o += a.length; }
+  return out;
+}
+
+function readCFBStreams(u8){
+  const sig = [0xd0,0xcf,0x11,0xe0,0xa1,0xb1,0x1a,0xe1];
+  for (let i=0;i<8;i++) if (u8[i]!==sig[i]) throw new Error("HWP(OLE) 형식이 아닙니다.");
+  const sectorSize = 1 << u16(u8,30);
+  const miniSectorSize = 1 << u16(u8,32);
+  const firstDir = u32(u8,48);
+  const miniCutoff = u32(u8,56);
+  const firstMiniFat = u32(u8,60);
+  const numMiniFat = u32(u8,64);
+  const firstDifat = u32(u8,68);
+  const numDifat = u32(u8,72);
+  const END=0xFFFFFFFE, FREE=0xFFFFFFFF;
+  const secOff = (s)=>(s+1)*sectorSize;
+
+  const fatSectors=[];
+  for (let i=0;i<109;i++){ const v=u32(u8,76+i*4); if (v!==FREE && v!==END) fatSectors.push(v); }
+  let ds=firstDifat; const per=sectorSize/4-1;
+  for (let k=0;k<numDifat && ds!==END && ds!==FREE;k++){
+    const b=secOff(ds);
+    for (let i=0;i<per;i++){ const v=u32(u8,b+i*4); if (v!==FREE && v!==END) fatSectors.push(v); }
+    ds=u32(u8,b+per*4);
+  }
+  const fat=[];
+  for (const s of fatSectors){ const b=secOff(s); for (let i=0;i<sectorSize/4;i++) fat.push(u32(u8,b+i*4)); }
+
+  const chain=(start,table)=>{ const out=[]; let s=start,g=0; while(s!==END && s!==FREE && s!=null && g++<1e7){ out.push(s); s=table[s]; } return out; };
+  const readBig=(start)=>{ const parts=[]; for (const s of chain(start,fat)){ const o=secOff(s); parts.push(u8.subarray(o,o+sectorSize)); } return parts.length?u8concat(parts):new Uint8Array(0); };
+
+  const dir=readBig(firstDir);
+  const dec16=new TextDecoder("utf-16le");
+  const entries=[];
+  for (let o=0;o+128<=dir.length;o+=128){
+    const nameLen=u16(dir,o+64);
+    if (nameLen<=0){ entries.push(null); continue; }
+    const name=dec16.decode(dir.subarray(o,o+nameLen-2));
+    entries.push({ name, type:dir[o+66], start:u32(dir,o+116), size:u32(dir,o+120) });
+  }
+  const root=entries.find(e=>e && e.type===5);
+  const miniStream=root?readBig(root.start).subarray(0,root.size):new Uint8Array(0);
+  const miniFat=[];
+  if (numMiniFat>0 && firstMiniFat!==END){ const mb=readBig(firstMiniFat); for (let i=0;i+4<=mb.length;i+=4) miniFat.push(u32(mb,i)); }
+  const readMini=(start,size)=>{ const parts=[]; for (const s of chain(start,miniFat)){ const o=s*miniSectorSize; parts.push(miniStream.subarray(o,o+miniSectorSize)); } return (parts.length?u8concat(parts):new Uint8Array(0)).subarray(0,size); };
+  const readStream=(e)=> e.size<miniCutoff ? readMini(e.start,e.size) : readBig(e.start).subarray(0,e.size);
+
+  const streams={};
+  for (const e of entries) if (e && e.type===2) streams[e.name]=readStream(e);
+  return streams;
+}
+
+function decodeParaText(payload){
+  let out=""; const n=payload.length-(payload.length%2); let j=0;
+  while (j<n){
+    const code=payload[j]|(payload[j+1]<<8);
+    if (INLINE_CTRL.has(code)||EXT_CTRL.has(code)){ j+=16; continue; }
+    if (CHAR_CTRL.has(code)){ if (code===10||code===13) out+="\n"; j+=2; continue; }
+    out+=String.fromCharCode(code); j+=2;
+  }
+  return out;
+}
+function parseRecords(data){
+  const parts=[]; let i=0;
+  while (i+4<=data.length){
+    const h=u32(data,i); i+=4;
+    const tag=h&0x3FF; let size=(h>>>20)&0xFFF;
+    if (size===0xFFF){ size=u32(data,i); i+=4; }
+    const payload=data.subarray(i,i+size); i+=size;
+    if (tag===67) parts.push(decodeParaText(payload));
+  }
+  return parts.join("\n");
+}
+function extractHwp(u8){
+  const streams=readCFBStreams(u8);
+  let compressed=true;
+  const fh=streams["FileHeader"];
+  if (fh && fh.length>36) compressed=(fh[36]&0x01)===1;
+  const secs=Object.keys(streams).filter(n=>/^Section\d+$/.test(n))
+    .sort((a,b)=>(+a.match(/\d+/))-(+b.match(/\d+/)));
+  const out=[];
+  for (const name of secs){
+    let data=streams[name];
+    if (compressed) data=pako.inflateRaw(data);
+    out.push(parseRecords(data));
+  }
+  return out.join("\n");
+}
+
+function tidy(t){
+  return t.replace(/\r\n?/g,"\n").replace(/[ \t ]+/g," ")
+          .replace(/\n{3,}/g,"\n\n").split("\n").map(s=>s.trim()).join("\n").trim();
+}
+
+/* ================= 청킹 ================= */
+function chunkText(text, size=1200, overlap=200){
+  text=text.trim(); if (!text) return [];
+  if (text.length<=size) return [text];
+  const chunks=[]; let start=0;
+  while (start<text.length){
+    let end=Math.min(start+size,text.length);
+    if (end<text.length){
+      const win=text.slice(start,end);
+      for (const sep of ["\n\n","\n",". ","。"," "]){
+        const cut=win.lastIndexOf(sep);
+        if (cut>size*0.7){ end=start+cut+sep.length; break; }
+      }
+    }
+    chunks.push(text.slice(start,end).trim());
+    if (end>=text.length) break;
+    start=Math.max(end-overlap,start+1);
+  }
+  return chunks.filter(Boolean);
+}
+
+/* ================= 임베딩 모델 ================= */
+async function ensureModel(){
+  if (extractor) return;
+  $("modelBarWrap").style.display="block";
+  $("modelStatus").textContent="모델을 내려받는 중… (최초 1회, 약 100MB)";
+  $("modelStatus").className="note st-warn";
+  const { pipeline, env } = await import("https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2");
+  env.allowLocalModels=false;
+  extractor = await pipeline("feature-extraction","Xenova/multilingual-e5-small",{
+    progress_callback:(p)=>{
+      if (p && p.status==="progress" && p.total){
+        $("modelBar").style.width=Math.round(100*p.loaded/p.total)+"%";
+      }
+    }
+  });
+  $("modelBar").style.width="100%";
+  $("modelStatus").textContent="모델 준비 완료 ✓ (이후에는 캐시에서 즉시 로드)";
+  $("modelStatus").className="note st-ok";
+}
+async function embed(text, isQuery){
+  const out = await extractor((isQuery?"query: ":"passage: ")+text,{pooling:"mean",normalize:true});
+  return Float32Array.from(out.data);
+}
+
+/* ================= 문서/UI ================= */
+function renderDocs(){
+  const tb=$("docTable").querySelector("tbody"); tb.innerHTML="";
+  $("docTable").style.display = docs.length?"table":"none";
+  for (const d of docs){
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td>${esc(d.name)}</td><td><span class="chip">${d.ext.toUpperCase()}</span></td>
+      <td>${d.text?d.text.length.toLocaleString():"-"}</td><td class="${d.cls}">${d.status}</td>`;
+    tb.appendChild(tr);
+  }
+  const ready=docs.some(d=>d.text && d.text.length);
+  $("embedBtn").disabled=!ready;
+  $("embedStatus").textContent = ready ? `${docs.length}개 문서 준비됨.` : "텍스트가 추출된 문서가 없습니다.";
+  $("embedStatus").className="note st-muted";
+}
+function esc(s){ return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+async function addFiles(fileList){
+  for (const f of fileList){
+    const ext=(f.name.split(".").pop()||"").toLowerCase();
+    const d={name:f.name,ext,text:"",status:"추출 중…",cls:"st-warn"};
+    docs.push(d); renderDocs();
+    try{
+      const buf=await f.arrayBuffer();
+      d.text=await extractText(f.name,buf);
+      if (d.text.length){ d.status="추출 완료 ✓"; d.cls="st-ok"; }
+      else { d.status="텍스트 없음(스캔본?)"; d.cls="st-err"; }
+    }catch(e){ d.status="실패: "+e.message; d.cls="st-err"; }
+    renderDocs();
+  }
+}
+
+/* ================= 이벤트 ================= */
+$("drop").addEventListener("click",()=>$("file").click());
+$("file").addEventListener("change",e=>addFiles(e.target.files));
+["dragover","dragenter"].forEach(ev=>$("drop").addEventListener(ev,e=>{e.preventDefault();$("drop").classList.add("over");}));
+["dragleave","drop"].forEach(ev=>$("drop").addEventListener(ev,e=>{e.preventDefault();$("drop").classList.remove("over");}));
+$("drop").addEventListener("drop",e=>{ if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
+
+$("clearDocs").addEventListener("click",()=>{ docs.length=0; renderDocs(); });
+
+$("loadSamples").addEventListener("click",()=>{
+  const samples=JSON.parse($("samples").textContent);
+  for (const s of samples){
+    docs.push({name:s.name,ext:(s.name.split(".").pop()||"").toLowerCase(),
+               text:tidy(s.text),status:"추출 완료 ✓(내장 샘플)",cls:"st-ok"});
+  }
+  renderDocs();
+});
+
+$("embedBtn").addEventListener("click",async()=>{
+  $("embedBtn").disabled=true;
+  try{
+    await ensureModel();
+    index=[];
+    const jobs=[];
+    for (const d of docs){
+      if (!d.text) continue;
+      chunkText(d.text).forEach((c,i)=>jobs.push({source:d.name,chunk:i,text:c}));
+    }
+    $("embedBarWrap").style.display="block";
+    for (let i=0;i<jobs.length;i++){
+      const j=jobs[i];
+      j.vector=await embed(j.text,false);
+      index.push(j);
+      $("embedBar").style.width=Math.round(100*(i+1)/jobs.length)+"%";
+      $("embedStatus").textContent=`임베딩 중… ${i+1}/${jobs.length}`;
+      $("embedStatus").className="note st-warn";
+    }
+    $("embedStatus").textContent=`완료 ✓ ${index.length}개 조각을 임베딩했습니다. 이제 검색하세요.`;
+    $("embedStatus").className="note st-ok";
+    $("searchBtn").disabled=false;
+    $("saveIndex").disabled=false;
+  }catch(e){
+    $("embedStatus").textContent="오류: "+e.message+" (인터넷 연결/CDN 접근을 확인하세요)";
+    $("embedStatus").className="note st-err";
+  }finally{
+    $("embedBtn").disabled=false;
+  }
+});
+
+function cosineTopK(qvec,k){
+  const scored=index.map(it=>{
+    let dot=0; const v=it.vector; for (let i=0;i<v.length;i++) dot+=v[i]*qvec[i];
+    return {it,score:dot};
+  });
+  scored.sort((a,b)=>b.score-a.score);
+  return scored.slice(0,k);
+}
+async function runSearch(){
+  const q=$("q").value.trim(); if (!q || !index.length) return;
+  $("searchBtn").disabled=true;
+  try{
+    await ensureModel();
+    const qvec=await embed(q,true);
+    const top=cosineTopK(qvec,parseInt($("topk").value,10));
+    const box=$("results"); box.innerHTML="";
+    top.forEach((r,i)=>{
+      const div=document.createElement("div"); div.className="res";
+      div.innerHTML=`<h4><span>[${i+1}] ${esc(r.it.source)} <span class="chip">조각 ${r.it.chunk}</span></span>
+        <span class="score">${r.score.toFixed(4)}</span></h4>
+        <p>${esc(r.it.text.slice(0,300))}${r.it.text.length>300?"…":""}</p>`;
+      box.appendChild(div);
+    });
+  }finally{ $("searchBtn").disabled=false; }
+}
+$("searchBtn").addEventListener("click",runSearch);
+$("q").addEventListener("keydown",e=>{ if (e.key==="Enter") runSearch(); });
+
+/* ---- 인덱스 저장/불러오기 ---- */
+$("saveIndex").addEventListener("click",()=>{
+  const data={model:"Xenova/multilingual-e5-small",
+    items:index.map(it=>({source:it.source,chunk:it.chunk,text:it.text,vector:Array.from(it.vector)}))};
+  const blob=new Blob([JSON.stringify(data)],{type:"application/json"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+  a.download="index.json"; a.click(); URL.revokeObjectURL(a.href);
+});
+$("loadIndexBtn").addEventListener("click",()=>$("indexFile").click());
+$("indexFile").addEventListener("change",async e=>{
+  const f=e.target.files[0]; if (!f) return;
+  const data=JSON.parse(await f.text());
+  index=data.items.map(it=>({...it,vector:Float32Array.from(it.vector)}));
+  $("searchBtn").disabled=false; $("saveIndex").disabled=false;
+  $("embedStatus").textContent=`인덱스 불러옴 ✓ ${index.length}개 조각. 바로 검색할 수 있습니다.`;
+  $("embedStatus").className="note st-ok";
+});
+</script>
+</body>
+</html>
