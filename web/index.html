@@ -497,6 +497,14 @@ function groupByDocument(qvec){
   return Object.values(best).sort((a,b)=>b.score-a.score);
 }
 
+// 원점수(코사인)를 "관련도 %"로 보정. 이 검색어에 대한 전체 문서의 기준선(중앙값)을
+// 빼서, 두드러지게 높은 문서만 높은 %가 되게 한다 → 관련 없으면 0%에 가까움.
+const MATCH_MARGIN=0.12; // 기준선보다 이만큼 높으면 관련도 100%
+function median(arr){
+  const b=[...arr].sort((x,y)=>x-y); const m=b.length>>1;
+  return b.length ? (b.length%2 ? b[m] : (b[m-1]+b[m])/2) : 0;
+}
+
 async function runSearch(){
   const q=$("q").value.trim(); if (!q || !index.length) return;
   lastQuery=q;
@@ -504,34 +512,33 @@ async function runSearch(){
   try{
     await ensureModel();
     const qvec=await embed(q,true);
-    const ranked=groupByDocument(qvec).slice(0,parseInt($("topk").value,10));
+    const all=groupByDocument(qvec);                 // 전체 문서(정렬됨)
+    const baseline = all.length>=3 ? median(all.map(r=>r.score)) : 0.75;
+    const matchPct = s => Math.round(Math.max(0,Math.min(1,(s-baseline)/MATCH_MARGIN))*100);
+    const ranked=all.slice(0,parseInt($("topk").value,10));
     const box=$("results"); box.innerHTML="";
     if (!ranked.length){ box.innerHTML='<p class="note">검색 결과가 없습니다.</p>'; return; }
     box.insertAdjacentHTML("beforeend",
       '<p class="note" style="margin:4px 0 10px">💡 문서 <b>한 개당 한 줄</b>로 정리했습니다(가장 관련 높은 구간 기준). '
-      + '<mark>노란색</mark>은 검색어 위치, 오른쪽 <b>▸</b>는 본문 전체 보기입니다.<br>'
-      + '⚠️ <b>유사도 %는 “몇 % 일치”가 아닙니다.</b> 이 모델은 관련이 없어도 70~80%가 기본으로 나옵니다. '
-      + '<b>1등이 나머지보다 뚜렷이 높은지(점수 차이)</b>와 절대값이 <b>85% 이상</b>인지를 보세요.</p>');
-    // 1등과 2등의 점수 차이가 작거나 최고점이 낮으면 "뚜렷한 일치 없음" 안내
-    const topScore=ranked[0].score;
-    const gap = ranked.length>1 ? topScore-ranked[1].score : 1;
-    if (topScore<0.85 || gap<0.02){
+      + '<b>관련도 %</b>는 검색어와의 관련 정도를 보정한 값으로, <b>관련이 없으면 0%</b>에 가깝습니다. '
+      + '<mark>노란색</mark>은 검색어 위치, 오른쪽 <b>▸</b>는 본문 전체 보기입니다.</p>');
+    // 최고 관련도가 낮으면 "뚜렷한 일치 없음" 안내
+    if (matchPct(all[0].score) < 15){
       box.insertAdjacentHTML("beforeend",
         '<p class="note st-warn" style="margin:0 0 10px">🔸 뚜렷하게 일치하는 문서가 없어 보입니다 '
-        + `(최고 ${Math.round(topScore*1000)/10}%, 1·2등 차이 ${Math.round(gap*1000)/10}%p). `
-        + '검색어와 실제로 관련된 문서가 없을 수 있습니다.</p>');
+        + '(관련도가 모두 낮음). 검색어와 실제로 관련된 문서가 없을 수 있습니다.</p>');
     }
     ranked.forEach((r,i)=>{
       const it=r.it;
       const chunkLabel = it.nChunks>1 ? `관련 구간 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
-      const pct=Math.round(r.score*1000)/10;
+      const pct=matchPct(r.score);
       const full=(docTexts[it.source]||it.text);
       const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
       const div=document.createElement("div"); div.className="res";
       div.innerHTML=
         `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
         + `<b>[${i+1}] ${esc(it.source)}</b> <span class="chip" title="문서 안에서 검색어와 가장 관련 높은 구간입니다">${chunkLabel}</span></span>`
-        + `<span class="score" title="의미 유사도(높을수록 관련)">유사도 ${pct}%</span></h4>`
+        + `<span class="score" title="원점수(코사인) ${(r.score*100).toFixed(1)}%">관련도 ${pct}%</span></h4>`
         + `<p class="preview">${highlight(preview,q)}</p>`
         + `<div class="fulltext" style="display:none">${highlight(full,q)}</div>`;
       const btn=div.querySelector(".toggle");
