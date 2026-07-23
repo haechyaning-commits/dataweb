@@ -186,14 +186,14 @@
     <div class="step"><span class="num">M</span>임베딩 모델</div>
     <div id="modelName" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <select id="modelSel" style="font-weight:600">
-        <option value="bge-m3">BGE-M3 — 고품질·다국어 (정확하지만 무겁고 느림)</option>
-        <option value="e5-small">multilingual-e5-small — 빠르고 가벼움 (품질 약간 낮음)</option>
+        <option value="e5-small" selected>⚡ multilingual-e5-small — 빠르고 가벼움 (권장·기본)</option>
+        <option value="bge-m3">🎯 BGE-M3 — 고품질·다국어 (정확하지만 무겁고 느림, 수백 MB)</option>
       </select>
     </div>
     <div id="modelStatus" class="note st-muted" style="margin-top:8px">
-      아직 로드되지 않음 — 임베딩/검색 시작 시 자동으로 내려받아 브라우저 캐시에 저장합니다(최초 1회, 인터넷 필요).
+      아직 로드되지 않음 — 임베딩/검색 시작 시 모델을 <b>최초 1회</b> 내려받아 브라우저 캐시에 저장합니다(인터넷 필요).
       임베딩은 <b>백그라운드(웹워커)</b>에서 처리되어 화면이 멈추지 않습니다.
-      <b>BGE-M3가 너무 느리면</b> 위 목록에서 <b>빠른 모델</b>로 바꾼 뒤 다시 임베딩하세요.
+      기본은 <b>빠른 모델</b>이며, 더 정확한 결과가 필요할 때만 BGE-M3로 바꾸세요(대기 길어짐).
     </div>
     <div class="bar" id="modelBarWrap" style="display:none"><i id="modelBar"></i></div>
   </div>
@@ -312,7 +312,9 @@ const MODELS = {
   "bge-m3":   { id:"Xenova/bge-m3",                 label:"BGE-M3 (고품질·다국어)",              pooling:"cls",  q:"",        p:"" },
   "e5-small": { id:"Xenova/multilingual-e5-small",  label:"multilingual-e5-small (빠름·가벼움)", pooling:"mean", q:"query: ", p:"passage: " },
 };
-let modelKey = "bge-m3";
+// 기본값은 '빠른' 경량 모델. 브라우저 환경에서 BGE-M3는 무거워 대기가 길기 때문에
+// 기본은 e5-small(빠름·가벼움)로 두고, 고품질이 필요하면 상단에서 BGE-M3로 전환한다.
+let modelKey = "e5-small";
 const curModel = () => MODELS[modelKey];
 
 /* ================= 상태 ================= */
