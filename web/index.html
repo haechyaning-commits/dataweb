@@ -120,9 +120,9 @@
     <div class="row">
       <input id="q" type="text" placeholder="예) 임산부 시간외근로 승인 / 전용통신망 수의계약 / 방만경영 예산통제" />
       <select id="topk">
-        <option value="3">상위 3</option>
-        <option value="5" selected>상위 5</option>
-        <option value="10">상위 10</option>
+        <option value="3">문서 3개</option>
+        <option value="5" selected>문서 5개</option>
+        <option value="10">문서 10개</option>
       </select>
       <button class="primary" id="searchBtn" disabled>검색</button>
     </div>
@@ -481,6 +481,16 @@ function highlight(text, query){
   return html;
 }
 
+// 모든 조각의 점수를 구한 뒤, 문서(파일)별로 묶어 "가장 관련 높은 구간" 하나만 남긴다.
+function groupByDocument(qvec){
+  const best={}; // source -> {source,score,it}
+  for (const it of index){
+    let dot=0; const v=it.vector; for (let i=0;i<v.length;i++) dot+=v[i]*qvec[i];
+    if (!best[it.source] || dot>best[it.source].score) best[it.source]={source:it.source,score:dot,it};
+  }
+  return Object.values(best).sort((a,b)=>b.score-a.score);
+}
+
 async function runSearch(){
   const q=$("q").value.trim(); if (!q || !index.length) return;
   lastQuery=q;
@@ -488,23 +498,23 @@ async function runSearch(){
   try{
     await ensureModel();
     const qvec=await embed(q,true);
-    const top=cosineTopK(qvec,parseInt($("topk").value,10));
+    const ranked=groupByDocument(qvec).slice(0,parseInt($("topk").value,10));
     const box=$("results"); box.innerHTML="";
-    if (!top.length){ box.innerHTML='<p class="note">검색 결과가 없습니다.</p>'; return; }
+    if (!ranked.length){ box.innerHTML='<p class="note">검색 결과가 없습니다.</p>'; return; }
     box.insertAdjacentHTML("beforeend",
-      '<p class="note" style="margin:4px 0 10px">💡 <b>유사도</b>가 높을수록 관련도가 큽니다. '
-      + '<mark>노란색</mark>이 검색어 위치입니다. 오른쪽 <b>▸</b>를 누르면 본문 전체가 펼쳐집니다. '
-      + '“조각”은 긴 문서를 나눈 구간 번호예요.</p>');
-    top.forEach((r,i)=>{
+      '<p class="note" style="margin:4px 0 10px">💡 문서 <b>한 개당 한 줄</b>로 정리했습니다(가장 관련 높은 구간 기준). '
+      + '<b>유사도</b>가 높을수록 관련도가 큽니다. <mark>노란색</mark>이 검색어 위치이며, '
+      + '오른쪽 <b>▸</b>를 누르면 본문 전체를 볼 수 있습니다.</p>');
+    ranked.forEach((r,i)=>{
       const it=r.it;
-      const chunkLabel = it.nChunks>1 ? `조각 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
+      const chunkLabel = it.nChunks>1 ? `관련 구간 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
       const pct=Math.round(r.score*1000)/10;
       const full=(docTexts[it.source]||it.text);
       const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
       const div=document.createElement("div"); div.className="res";
       div.innerHTML=
         `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
-        + `[${i+1}] ${esc(it.source)} <span class="chip" title="긴 문서를 나눈 구간 번호입니다">${chunkLabel}</span></span>`
+        + `<b>[${i+1}] ${esc(it.source)}</b> <span class="chip" title="문서 안에서 검색어와 가장 관련 높은 구간입니다">${chunkLabel}</span></span>`
         + `<span class="score" title="의미 유사도(높을수록 관련)">유사도 ${pct}%</span></h4>`
         + `<p class="preview">${highlight(preview,q)}</p>`
         + `<div class="fulltext" style="display:none">${highlight(full,q)}</div>`;
