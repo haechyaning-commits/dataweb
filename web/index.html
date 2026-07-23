@@ -47,9 +47,16 @@
   .bar{height:8px;background:var(--chip);border-radius:999px;overflow:hidden;margin-top:10px}
   .bar > i{display:block;height:100%;width:0;background:var(--brand);transition:width .2s}
   .res{border:1px solid var(--line);border-radius:11px;padding:12px 14px;margin:10px 0;background:var(--card)}
-  .res h4{margin:0 0 4px;font-size:14px;display:flex;justify-content:space-between;gap:10px}
-  .res .score{color:var(--brand);font-variant-numeric:tabular-nums}
+  .res h4{margin:0 0 4px;font-size:14px;display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+  .res .rtitle{display:flex;gap:6px;align-items:baseline;flex:1}
+  .res .score{color:var(--brand);font-variant-numeric:tabular-nums;white-space:nowrap}
   .res p{margin:6px 0 0;font-size:13px;color:var(--muted);white-space:pre-wrap}
+  .res .fulltext{margin:8px 0 0;font-size:13px;color:var(--text);white-space:pre-wrap;
+        max-height:340px;overflow:auto;padding:10px 12px;background:var(--chip);border-radius:9px}
+  .toggle{border:none;background:transparent;color:var(--brand);cursor:pointer;font-size:14px;
+        padding:0 4px 0 0;line-height:1}
+  mark{background:#fde68a;color:#111;border-radius:3px;padding:0 1px}
+  @media (prefers-color-scheme: dark){ mark{background:#b7791f;color:#fff} }
   .note{font-size:12px;color:var(--muted)}
   code{background:var(--chip);padding:1px 6px;border-radius:6px;font-size:12px}
   a{color:var(--brand)}
@@ -166,7 +173,9 @@ if (window.pdfjsLib) {
 
 /* ================= 상태 ================= */
 const docs = [];      // {name, ext, text, status}
-let index = [];       // {source, chunk, text, vector:Float32Array}
+let index = [];       // {source, chunk, nChunks, text, vector:Float32Array}
+let docTexts = {};    // {문서이름: 전체 본문} — 결과 펼치기에서 사용
+let lastQuery = "";   // 하이라이트용 마지막 검색어
 let extractor = null; // transformers.js 파이프라인
 
 const $ = (id) => document.getElementById(id);
@@ -423,10 +432,13 @@ $("embedBtn").addEventListener("click",async()=>{
   try{
     await ensureModel();
     index=[];
+    docTexts={};
     const jobs=[];
     for (const d of docs){
       if (!d.text) continue;
-      chunkText(d.text).forEach((c,i)=>jobs.push({source:d.name,chunk:i,text:c}));
+      docTexts[d.name]=d.text;
+      const cs=chunkText(d.text);
+      cs.forEach((c,i)=>jobs.push({source:d.name,chunk:i,nChunks:cs.length,text:c}));
     }
     $("embedBarWrap").style.display="block";
     for (let i=0;i<jobs.length;i++){
@@ -457,19 +469,55 @@ function cosineTopK(qvec,k){
   scored.sort((a,b)=>b.score-a.score);
   return scored.slice(0,k);
 }
+// 검색어를 본문에서 찾아 <mark>로 강조. 공백으로 나눈 2글자 이상 토큰을 부분일치로 표시.
+function highlight(text, query){
+  let html=esc(text);
+  const tokens=[...new Set((query||"").split(/\s+/).filter(t=>t.length>=2))]
+    .sort((a,b)=>b.length-a.length);
+  for (const t of tokens){
+    const re=new RegExp(esc(t).replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"gi");
+    html=html.replace(re,m=>`<mark>${m}</mark>`);
+  }
+  return html;
+}
+
 async function runSearch(){
   const q=$("q").value.trim(); if (!q || !index.length) return;
+  lastQuery=q;
   $("searchBtn").disabled=true;
   try{
     await ensureModel();
     const qvec=await embed(q,true);
     const top=cosineTopK(qvec,parseInt($("topk").value,10));
     const box=$("results"); box.innerHTML="";
+    if (!top.length){ box.innerHTML='<p class="note">검색 결과가 없습니다.</p>'; return; }
+    box.insertAdjacentHTML("beforeend",
+      '<p class="note" style="margin:4px 0 10px">💡 <b>유사도</b>가 높을수록 관련도가 큽니다. '
+      + '<mark>노란색</mark>이 검색어 위치입니다. 오른쪽 <b>▸</b>를 누르면 본문 전체가 펼쳐집니다. '
+      + '“조각”은 긴 문서를 나눈 구간 번호예요.</p>');
     top.forEach((r,i)=>{
+      const it=r.it;
+      const chunkLabel = it.nChunks>1 ? `조각 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
+      const pct=Math.round(r.score*1000)/10;
+      const full=(docTexts[it.source]||it.text);
+      const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
       const div=document.createElement("div"); div.className="res";
-      div.innerHTML=`<h4><span>[${i+1}] ${esc(r.it.source)} <span class="chip">조각 ${r.it.chunk}</span></span>
-        <span class="score">${r.score.toFixed(4)}</span></h4>
-        <p>${esc(r.it.text.slice(0,300))}${r.it.text.length>300?"…":""}</p>`;
+      div.innerHTML=
+        `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
+        + `[${i+1}] ${esc(it.source)} <span class="chip" title="긴 문서를 나눈 구간 번호입니다">${chunkLabel}</span></span>`
+        + `<span class="score" title="의미 유사도(높을수록 관련)">유사도 ${pct}%</span></h4>`
+        + `<p class="preview">${highlight(preview,q)}</p>`
+        + `<div class="fulltext" style="display:none">${highlight(full,q)}</div>`;
+      const btn=div.querySelector(".toggle");
+      const ft=div.querySelector(".fulltext");
+      const pv=div.querySelector(".preview");
+      btn.addEventListener("click",()=>{
+        const open=ft.style.display==="none";
+        ft.style.display=open?"block":"none";
+        pv.style.display=open?"none":"block";
+        btn.textContent=open?"▾":"▸";
+        btn.setAttribute("aria-label",open?"접기":"펼치기");
+      });
       box.appendChild(div);
     });
   }finally{ $("searchBtn").disabled=false; }
@@ -479,8 +527,8 @@ $("q").addEventListener("keydown",e=>{ if (e.key==="Enter") runSearch(); });
 
 /* ---- 인덱스 저장/불러오기 ---- */
 $("saveIndex").addEventListener("click",()=>{
-  const data={model:"Xenova/multilingual-e5-small",
-    items:index.map(it=>({source:it.source,chunk:it.chunk,text:it.text,vector:Array.from(it.vector)}))};
+  const data={model:"Xenova/multilingual-e5-small", docTexts,
+    items:index.map(it=>({source:it.source,chunk:it.chunk,nChunks:it.nChunks,text:it.text,vector:Array.from(it.vector)}))};
   const blob=new Blob([JSON.stringify(data)],{type:"application/json"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
   a.download="index.json"; a.click(); URL.revokeObjectURL(a.href);
@@ -490,6 +538,7 @@ $("indexFile").addEventListener("change",async e=>{
   const f=e.target.files[0]; if (!f) return;
   const data=JSON.parse(await f.text());
   index=data.items.map(it=>({...it,vector:Float32Array.from(it.vector)}));
+  docTexts=data.docTexts||{};
   $("searchBtn").disabled=false; $("saveIndex").disabled=false;
   $("embedStatus").textContent=`인덱스 불러옴 ✓ ${index.length}개 조각. 바로 검색할 수 있습니다.`;
   $("embedStatus").className="note st-ok";
