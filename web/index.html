@@ -77,6 +77,12 @@
   .tagbtn.on{background:var(--brand);color:#fff;border-color:var(--brand)}
   .tagcell{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
   .restags{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 0}
+  .filterbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:10px 0 0}
+  .filterbar:empty{display:none}
+  .filterbar .lbl{font-size:12px;color:var(--muted);margin-right:2px}
+  .histchip{cursor:pointer;font-size:12px;background:var(--chip);color:var(--text);
+        border:1px solid var(--line);padding:1px 9px;border-radius:999px}
+  .histchip:hover{border-color:var(--brand)}
   mark{background:#fde68a;color:#111;border-radius:3px;padding:0 1px}
   @media (prefers-color-scheme: dark){ mark{background:#b7791f;color:#fff} }
   .note{font-size:12px;color:var(--muted)}
@@ -157,6 +163,8 @@
       </select>
       <button class="primary" id="searchBtn" disabled>검색</button>
     </div>
+    <div id="history" class="filterbar"></div>
+    <div id="filters" class="filterbar"></div>
     <div id="results"></div>
   </div>
 
@@ -208,6 +216,9 @@ const docs = [];      // {name, ext, text, status}
 let index = [];       // {source, chunk, nChunks, text, vector:Float32Array}
 let docTexts = {};    // {문서이름: 전체 본문} — 결과 펼치기에서 사용
 let docTags = {};     // {문서이름: [태그,...]} — 자동추출 태그(필터/열람용)
+let activeTags = new Set(); // 현재 켜진 태그 필터
+let _repaint = null;  // 마지막 검색 결과를 다시 그리는 함수(필터 토글 시 재사용)
+const HIST_KEY = "dataweb.history"; // 검색 히스토리 localStorage 키
 let lastQuery = "";   // 하이라이트용 마지막 검색어
 let extractor = null; // transformers.js 파이프라인
 let indexModel = "Xenova/multilingual-e5-small"; // 현재 인덱스를 만든 모델
@@ -711,13 +722,23 @@ async function runSearch(){
         + '(점수에 올리면 원점수). 각 문서 아래 <b>🔗 문맥 기반 유사 문서</b>는 <b>검색어와 무관하게</b> '
         + '내용이 비슷한 파일입니다(반복·유사 지적 추적). <mark>노란색</mark>=검색어 위치, <b>▸</b>=본문 전체.</p>');
 
-      const pool = revealAll ? all : all.filter(r=>relPct(r.score)>=REL_CUT);
-      if (!pool.length){
+      const relPool = revealAll ? all : all.filter(r=>relPct(r.score)>=REL_CUT);
+      if (!relPool.length){
         box.insertAdjacentHTML("beforeend",
           '<p class="note st-warn" style="margin:0">🔸 관련도 <b>70% 이상</b>인 문서가 없습니다. '
           + '검색어와 뚜렷이 일치하는 문서가 없을 수 있습니다. '
           + '<button type="button" id="revealBtn" class="linklike">낮은 관련 결과도 보기</button></p>');
         const rb=$("revealBtn"); if (rb) rb.addEventListener("click",()=>paint(true));
+        return;
+      }
+      // 태그 필터: 켜진 태그를 모두 가진 문서만 남긴다(AND).
+      const pool = activeTags.size
+        ? relPool.filter(r=>{ const t=docTags[r.it.source]||[]; return [...activeTags].every(x=>t.includes(x)); })
+        : relPool;
+      if (!pool.length){
+        box.insertAdjacentHTML("beforeend",
+          '<p class="note st-warn" style="margin:0">🔸 선택한 태그(<b>'+[...activeTags].map(esc).join(", ")
+          +'</b>)에 맞는 문서가 없습니다. 위에서 태그를 해제해 보세요.</p>');
         return;
       }
       const ranked=pool.slice(0,topk);
@@ -789,11 +810,60 @@ async function runSearch(){
         box.appendChild(div);
       });
     }
+    _repaint = paint;          // 필터 토글 시 재렌더용으로 붙잡아 둔다
     paint(false);
+    addHistory(q);             // 검색 히스토리에 기록
+    renderFilterBar();         // 현재 코퍼스 태그로 필터 버튼 갱신
   }finally{ $("searchBtn").disabled=false; }
 }
 $("searchBtn").addEventListener("click",runSearch);
 $("q").addEventListener("keydown",e=>{ if (e.key==="Enter") runSearch(); });
+
+/* ---- 검색 히스토리 ---- */
+function loadHistory(){ try{ return JSON.parse(localStorage.getItem(HIST_KEY))||[]; }catch(_){ return []; } }
+function addHistory(q){
+  let h=loadHistory().filter(x=>x!==q); h.unshift(q); h=h.slice(0,10);
+  try{ localStorage.setItem(HIST_KEY, JSON.stringify(h)); }catch(_){}
+  renderHistory();
+}
+function renderHistory(){
+  const h=loadHistory(), box=$("history");
+  if (!h.length){ box.innerHTML=""; return; }
+  box.innerHTML='<span class="lbl">최근 검색:</span>'
+    + h.map(x=>`<button type="button" class="histchip" data-q="${esc(x)}">${esc(x)}</button>`).join(" ")
+    + '<button type="button" class="linklike" id="histClear">지우기</button>';
+  box.querySelectorAll(".histchip").forEach(b=>b.addEventListener("click",()=>{
+    $("q").value=b.getAttribute("data-q"); runSearch();
+  }));
+  const c=$("histClear"); if (c) c.addEventListener("click",()=>{
+    try{ localStorage.removeItem(HIST_KEY); }catch(_){}; renderHistory();
+  });
+}
+
+/* ---- 태그 필터 ---- */
+function corpusTags(){
+  const seen=new Set();
+  for (const s in docTags) (docTags[s]||[]).forEach(t=>seen.add(t));
+  return [...seen].sort();
+}
+function renderFilterBar(){
+  const tags=corpusTags(), box=$("filters");
+  for (const t of [...activeTags]) if (!tags.includes(t)) activeTags.delete(t); // 없는 태그 정리
+  if (!tags.length){ box.innerHTML=""; return; }
+  box.innerHTML='<span class="lbl">태그 필터:</span>'
+    + tags.map(t=>`<button type="button" class="tag tagbtn${activeTags.has(t)?" on":""}" data-tag="${esc(t)}">${esc(t)}</button>`).join(" ")
+    + (activeTags.size?'<button type="button" class="linklike" id="filterClear">필터 초기화</button>':"");
+  box.querySelectorAll(".tagbtn").forEach(b=>b.addEventListener("click",()=>{
+    const t=b.getAttribute("data-tag");
+    if (activeTags.has(t)) activeTags.delete(t); else activeTags.add(t);
+    renderFilterBar();
+    if (_repaint) _repaint(false);   // 재검색 없이 결과만 필터링해 다시 그림
+  }));
+  const fc=$("filterClear"); if (fc) fc.addEventListener("click",()=>{
+    activeTags.clear(); renderFilterBar(); if (_repaint) _repaint(false);
+  });
+}
+renderHistory();  // 페이지 로드 시 이전 검색 기록 표시
 
 /* ---- 인덱스 저장/불러오기 ---- */
 $("saveIndex").addEventListener("click",()=>{
