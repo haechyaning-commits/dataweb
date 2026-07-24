@@ -5,6 +5,7 @@ REM
 REM  사용법:
 REM    search.bat "임산부 시간외근로"
 REM    search.bat --top 3 "전용통신망 수의계약"
+REM    search.bat --alpha 1.0 "방만경영 예산통제"   (순수 벡터검색)
 REM    search.bat --json "방만경영 예산통제"
 REM =====================================================================
 setlocal
@@ -12,7 +13,7 @@ cd /d "%~dp0"
 
 REM --- 인자 확인 ---
 if "%~1"=="" (
-    echo 사용법: search.bat "검색어"  [--top N] [--json]
+    echo 사용법: search.bat "검색어"  [--top N] [--alpha 0..1] [--json]
     echo   예:   search.bat "임산부 시간외근로"
     exit /b 1
 )

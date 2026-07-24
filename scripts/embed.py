@@ -70,6 +70,7 @@ def main() -> int:
                 "chunk": idx,
                 "n_chunks": len(chunks),
                 "preview": chunk[:200].replace("\n", " "),
+                "text": chunk,  # kept so search can run BM25 keyword scoring (hybrid)
             })
         eprint(f"[ok]   {path.name}: {len(chunks)} chunk(s)")
 

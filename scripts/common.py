@@ -46,6 +46,22 @@ HF_TOKEN = (
 QUERY_PREFIX = os.getenv("QUERY_PREFIX", "")
 PASSAGE_PREFIX = os.getenv("PASSAGE_PREFIX", "")
 
+# How to reduce the token-level output of the HF Inference API to one vector.
+#   cls  (default) - take the first ([CLS]) token. This is bge-m3 / BERT-style
+#                    models' *own* dense representation. Mean-pooling those token
+#                    vectors instead yields a different, blurrier vector and was a
+#                    real cause of low score discrimination (see docs/DIAGNOSIS.md B).
+#   mean           - average all token vectors. Correct for models trained that way
+#                    (many e5/sentence-transformers checkpoints).
+# The `local` backend ignores this and uses each model's built-in pooling.
+POOLING = os.getenv("POOLING", "cls").strip().lower()
+
+# Hybrid search: final score = HYBRID_ALPHA * dense + (1 - HYBRID_ALPHA) * bm25.
+# 1.0 = pure vector search (old behaviour), 0.0 = pure keyword (BM25).
+# Audit text is full of exact tokens (법 조항·기관명·금액) that dense vectors miss,
+# so a keyword component materially helps — see docs/DIAGNOSIS.md C.
+HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.6"))
+
 # Chunking (characters, not tokens — good enough for a demo corpus).
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
@@ -122,9 +138,11 @@ def _hf_api_one(text: str, retries: int = 4) -> np.ndarray:
     for attempt in range(retries):
         try:
             vec = np.asarray(_hf_client.feature_extraction(text), dtype=np.float32)
-            # Token-level output (n_tokens, dim) -> mean pool to a single vector.
+            # Token-level output (n_tokens, dim) -> reduce to a single vector.
+            # bge-m3 / BERT-style models expose their dense embedding at the [CLS]
+            # (first) token; averaging every token instead blurs it (DIAGNOSIS B).
             if vec.ndim == 2:
-                vec = vec.mean(axis=0)
+                vec = vec[0] if POOLING == "cls" else vec.mean(axis=0)
             return _l2_normalize(vec)
         except Exception as e:  # noqa: BLE001 - surface a readable message after retries
             if attempt == retries - 1:
@@ -180,7 +198,9 @@ def chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) 
         if end >= len(text):
             break
         start = max(end - overlap, start + 1)
-    return [c for c in chunks if c]
+    # Drop fragments too short to carry meaning (headers, stray lines); they add
+    # noise to the index and produce misleadingly high similarities on 1-2 words.
+    return [c for c in chunks if len(c) >= 10]
 
 
 def eprint(*args, **kwargs) -> None:

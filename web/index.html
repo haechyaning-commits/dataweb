@@ -107,8 +107,9 @@
       <span id="embedStatus" class="note st-muted">문서를 먼저 넣으세요.</span>
     </div>
     <label class="note" style="display:flex;align-items:center;gap:7px;margin-top:10px;cursor:pointer">
-      <input type="checkbox" id="splitChunks" />
-      긴 문서를 <b>조각으로 나눠서</b> 임베딩 (끄면 문서를 통째로 처리 — 구간 라벨 없이 문서당 점수 1개)
+      <input type="checkbox" id="splitChunks" checked />
+      긴 문서를 <b>조각으로 나눠서</b> 임베딩 <b>(권장)</b> — 끄면 문서를 통째로 벡터 1개로 처리해
+      여러 주제가 뭉개지고 <b>유사도 변별력이 떨어집니다</b>. 아주 짧은 문서에만 끄세요.
     </label>
     <div class="bar" id="embedBarWrap" style="display:none"><i id="embedBar"></i></div>
     <div class="row" style="margin-top:12px">
@@ -450,6 +451,7 @@ $("embedBtn").addEventListener("click",async()=>{
       const j=jobs[i];
       j.vector=await embed(j.text,false);
       index.push(j);
+      rebuildBM25();  // index changed → invalidate keyword stats
       $("embedBar").style.width=Math.round(100*(i+1)/jobs.length)+"%";
       $("embedStatus").textContent=`임베딩 중… ${i+1}/${jobs.length}`;
       $("embedStatus").className="note st-warn";
@@ -467,13 +469,49 @@ $("embedBtn").addEventListener("click",async()=>{
   }
 });
 
-function cosineTopK(qvec,k){
-  const scored=index.map(it=>{
-    let dot=0; const v=it.vector; for (let i=0;i<v.length;i++) dot+=v[i]*qvec[i];
-    return {it,score:dot};
+/* ===== 키워드(BM25) — 하이브리드 검색용 (DIAGNOSIS C) =====
+   순수 임베딩은 법 조항·기관명·금액 같은 정확 일치 토큰에 약하다. 한국어는
+   어절 + 한글 문자 bigram 으로 토큰화해(형태소 분석기 없이) 조사 차이를 흡수한다. */
+const HYBRID_ALPHA = 0.6;   // 최종점수 = α·임베딩 + (1-α)·키워드
+function tokenizeKo(text){
+  const t=(text||"").toLowerCase();
+  const out=(t.match(/[0-9a-z가-힣]+/g)||[]).slice();
+  for (const run of (t.match(/[가-힣]{2,}/g)||[]))
+    for (let i=0;i<run.length-1;i++) out.push(run.slice(i,i+2));
+  return out;
+}
+let _bm25=null;  // 인덱스가 바뀌면 rebuildBM25()로 무효화
+function rebuildBM25(){ _bm25=null; }
+function buildBM25(){
+  const docs=index.map(it=>{
+    const toks=tokenizeKo(it.text), freq=new Map();
+    for (const w of toks) freq.set(w,(freq.get(w)||0)+1);
+    return {len:toks.length,freq};
   });
-  scored.sort((a,b)=>b.score-a.score);
-  return scored.slice(0,k);
+  const N=docs.length, df=new Map();
+  for (const d of docs) for (const w of d.freq.keys()) df.set(w,(df.get(w)||0)+1);
+  const idf=new Map();
+  for (const [w,c] of df) idf.set(w, Math.max(0, Math.log(1+(N-c+0.5)/(c+0.5))));
+  const avgdl = N ? docs.reduce((s,d)=>s+d.len,0)/N : 0;
+  _bm25={docs,idf,avgdl,N};
+}
+function bm25Scores(query){
+  if (!_bm25) buildBM25();
+  const {docs,idf,avgdl,N}=_bm25, k1=1.5, b=0.75;
+  const q=tokenizeKo(query), out=new Array(N).fill(0);
+  if (!N || avgdl===0) return out;
+  for (const term of q){
+    const w=idf.get(term); if (!w) continue;
+    for (let i=0;i<N;i++){
+      const tf=docs[i].freq.get(term); if (!tf) continue;
+      out[i]+=w*(tf*(k1+1))/(tf+k1*(1-b+b*docs[i].len/avgdl));
+    }
+  }
+  return out;
+}
+function minmax(a){
+  const lo=Math.min(...a), hi=Math.max(...a);
+  return hi<=lo ? a.map(()=>0) : a.map(v=>(v-lo)/(hi-lo));
 }
 // 검색어를 본문에서 찾아 <mark>로 강조. 공백으로 나눈 2글자 이상 토큰을 부분일치로 표시.
 function highlight(text, query){
@@ -487,13 +525,20 @@ function highlight(text, query){
   return html;
 }
 
-// 모든 조각의 점수를 구한 뒤, 문서(파일)별로 묶어 "가장 관련 높은 구간" 하나만 남긴다.
-function groupByDocument(qvec){
-  const best={}; // source -> {source,score,it}
-  for (const it of index){
-    let dot=0; const v=it.vector; for (let i=0;i<v.length;i++) dot+=v[i]*qvec[i];
-    if (!best[it.source] || dot>best[it.source].score) best[it.source]={source:it.source,score:dot,it};
-  }
+// 조각별로 하이브리드 점수(임베딩+키워드)를 구하고, 문서별로 "가장 관련 높은 구간"만 남긴다.
+// 순위는 하이브리드 점수(score)로, 표시용 "관련도 %"는 절대척도인 코사인(cos)으로 계산한다.
+function groupByDocument(qvec, query){
+  const dense=index.map(it=>{
+    let dot=0; const v=it.vector; for (let i=0;i<v.length;i++) dot+=v[i]*qvec[i]; return dot;
+  });
+  const kw=bm25Scores(query);
+  const dN=minmax(dense), kN=minmax(kw);
+  const best={}; // source -> {source, score(hybrid), cos, it}
+  index.forEach((it,i)=>{
+    const h=HYBRID_ALPHA*dN[i]+(1-HYBRID_ALPHA)*kN[i];
+    if (!best[it.source] || h>best[it.source].score)
+      best[it.source]={source:it.source,score:h,cos:dense[i],it};
+  });
   return Object.values(best).sort((a,b)=>b.score-a.score);
 }
 
@@ -512,18 +557,19 @@ async function runSearch(){
   try{
     await ensureModel();
     const qvec=await embed(q,true);
-    const all=groupByDocument(qvec);                 // 전체 문서(정렬됨)
-    const baseline = all.length>=3 ? median(all.map(r=>r.score)) : 0.75;
+    const all=groupByDocument(qvec, q);              // 하이브리드 순위(정렬됨)
+    const baseline = all.length>=3 ? median(all.map(r=>r.cos)) : 0.75;
     const matchPct = s => Math.round(Math.max(0,Math.min(1,(s-baseline)/MATCH_MARGIN))*100);
     const ranked=all.slice(0,parseInt($("topk").value,10));
     const box=$("results"); box.innerHTML="";
     if (!ranked.length){ box.innerHTML='<p class="note">검색 결과가 없습니다.</p>'; return; }
     box.insertAdjacentHTML("beforeend",
       '<p class="note" style="margin:4px 0 10px">💡 문서 <b>한 개당 한 줄</b>로 정리했습니다(가장 관련 높은 구간 기준). '
+      + '순위는 <b>임베딩 + 키워드(BM25) 하이브리드</b>로 매깁니다. '
       + '<b>관련도 %</b>는 검색어와의 관련 정도를 보정한 값으로, <b>관련이 없으면 0%</b>에 가깝습니다. '
       + '<mark>노란색</mark>은 검색어 위치, 오른쪽 <b>▸</b>는 본문 전체 보기입니다.</p>');
     // 최고 관련도가 낮으면 "뚜렷한 일치 없음" 안내
-    if (matchPct(all[0].score) < 15){
+    if (matchPct(all[0].cos) < 15){
       box.insertAdjacentHTML("beforeend",
         '<p class="note st-warn" style="margin:0 0 10px">🔸 뚜렷하게 일치하는 문서가 없어 보입니다 '
         + '(관련도가 모두 낮음). 검색어와 실제로 관련된 문서가 없을 수 있습니다.</p>');
@@ -531,14 +577,14 @@ async function runSearch(){
     ranked.forEach((r,i)=>{
       const it=r.it;
       const chunkLabel = it.nChunks>1 ? `관련 구간 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
-      const pct=matchPct(r.score);
+      const pct=matchPct(r.cos);
       const full=(docTexts[it.source]||it.text);
       const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
       const div=document.createElement("div"); div.className="res";
       div.innerHTML=
         `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
         + `<b>[${i+1}] ${esc(it.source)}</b> <span class="chip" title="문서 안에서 검색어와 가장 관련 높은 구간입니다">${chunkLabel}</span></span>`
-        + `<span class="score" title="원점수(코사인) ${(r.score*100).toFixed(1)}%">관련도 ${pct}%</span></h4>`
+        + `<span class="score" title="코사인 ${(r.cos*100).toFixed(1)}% · 하이브리드 순위점수 ${r.score.toFixed(3)}">관련도 ${pct}%</span></h4>`
         + `<p class="preview">${highlight(preview,q)}</p>`
         + `<div class="fulltext" style="display:none">${highlight(full,q)}</div>`;
       const btn=div.querySelector(".toggle");
@@ -571,6 +617,7 @@ $("indexFile").addEventListener("change",async e=>{
   const f=e.target.files[0]; if (!f) return;
   const data=JSON.parse(await f.text());
   index=data.items.map(it=>({...it,vector:Float32Array.from(it.vector)}));
+  rebuildBM25();  // loaded a different index → invalidate keyword stats
   docTexts=data.docTexts||{};
   $("searchBtn").disabled=false; $("saveIndex").disabled=false;
   $("embedStatus").textContent=`인덱스 불러옴 ✓ ${index.length}개 조각. 바로 검색할 수 있습니다.`;

@@ -35,7 +35,7 @@ def extract_pdf(path: str) -> str:
         ) from e
 
     enable_ocr = os.getenv("ENABLE_OCR", "0").strip().lower() in ("1", "true", "yes")
-    parts: list[str] = []
+    pages: list[str] = []
     doc = fitz.open(path)
     try:
         for page in doc:
@@ -43,10 +43,12 @@ def extract_pdf(path: str) -> str:
             if not text and enable_ocr:
                 text = _ocr_page(page)
             if text:
-                parts.append(text)
+                pages.append(text)
     finally:
         doc.close()
-    return "\n".join(parts)
+    # Running headers/footers repeat on most pages and pollute every chunk they
+    # land in; drop lines that recur across many pages before joining. (DIAGNOSIS E)
+    return "\n".join(_strip_repeated_lines(pages))
 
 
 def _ocr_page(page) -> str:
@@ -222,12 +224,47 @@ def extract_text(path: str) -> str:
     return extractor(path)
 
 
+# A line that, once stripped, is nothing but a page marker: "12", "- 12 -",
+# "12/34", "12 페이지", "- 3 -". These carry no meaning and add noise to chunks.
+_PAGE_NUM_RE = re.compile(
+    r"^(?:[-–—]\s*)?\d{1,4}(?:\s*[-–—])?$"     # 12  /  - 12 -
+    r"|^\d{1,4}\s*/\s*\d{1,4}$"                 # 12/34
+    r"|^\d{1,4}\s*(?:페이지|쪽|page)$",          # 12 페이지
+    re.IGNORECASE,
+)
+
+
+def _strip_repeated_lines(pages: list[str], min_ratio: float = 0.5) -> list[str]:
+    """Remove running headers/footers: short lines that repeat across many pages."""
+    if len(pages) < 3:
+        return pages
+    from collections import Counter
+    counts: Counter[str] = Counter()
+    for page in pages:
+        # A header/footer appears once per page; count distinct lines per page.
+        seen = {ln.strip() for ln in page.split("\n") if ln.strip()}
+        counts.update(seen)
+    threshold = max(2, int(len(pages) * min_ratio))
+    boilerplate = {
+        line for line, c in counts.items()
+        if c >= threshold and len(line) <= 40  # long lines are unlikely to be chrome
+    }
+    if not boilerplate:
+        return pages
+    cleaned: list[str] = []
+    for page in pages:
+        kept = [ln for ln in page.split("\n") if ln.strip() not in boilerplate]
+        cleaned.append("\n".join(kept))
+    return cleaned
+
+
 def _tidy(text: str) -> str:
-    """Collapse runaway whitespace while keeping paragraph breaks."""
+    """Collapse runaway whitespace, drop page-number lines, keep paragraph breaks."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t ]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     lines = [ln.strip() for ln in text.split("\n")]
+    lines = [ln for ln in lines if not _PAGE_NUM_RE.match(ln)]
     return "\n".join(lines).strip()
 
 

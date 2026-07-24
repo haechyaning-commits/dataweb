@@ -70,10 +70,28 @@ embedding.bat
 ```bat
 search.bat "임산부 시간외근로"
 search.bat --top 3 "전용통신망 수의계약 케이티"
+search.bat --alpha 1.0 "방만경영 예산통제"   :: 순수 벡터검색으로 비교
 search.bat --json "방만경영 예산통제"
 ```
 
-→ 질문을 같은 모델로 임베딩해 **코사인 유사도**가 높은 문서 조각을 순위대로 보여줍니다.
+→ 질문을 같은 모델로 임베딩한 **코사인 유사도**와 **키워드(BM25)** 점수를 결합한
+**하이브리드 순위**로 문서 조각을 보여줍니다. `--alpha 1.0` 이면 순수 벡터검색입니다.
+
+## 4. 검색 품질 평가 (개선 전/후 비교)
+
+```bat
+python scripts\evaluate.py                :: 가능한 모든 모드, k=5
+python scripts\evaluate.py --modes bm25   :: 임베딩 없이 키워드만 (오프라인)
+python scripts\evaluate.py --alpha 0.5
+```
+
+`eval\queryset.json` 의 샘플 질의셋으로 **Precision@k · MRR · 변별력(관련/비관련 점수 차)**
+을 모드별(bm25 / vector / hybrid)로 출력합니다. 8만 건 확장 시 감사실 업무자가 대표
+질의와 정답 문서를 채워 넣으면 개선 전/후를 재현 가능하게 비교할 수 있습니다.
+
+> 진단 배경과 근거는 [`docs/DIAGNOSIS.md`](docs/DIAGNOSIS.md) 참고 — 낮은 검색 품질의
+> 실제 원인(웹 통째 임베딩 기본값, bge-m3 풀링 버그, 하이브리드 부재 등)을 코드 근거와
+> 함께 정리했습니다.
 
 ---
 
@@ -117,17 +135,24 @@ dataweb/
 ├─ requirements.txt
 ├─ data/                # 원본 문서(샘플 포함)
 ├─ index/              # 생성된 벡터 인덱스(index.npz)
+├─ eval/                # 평가용 샘플 질의셋(queryset.json)
+├─ docs/DIAGNOSIS.md     # 검색 품질 저하 원인 진단 보고서
 └─ scripts/
    ├─ common.py         # 설정 + 임베딩 백엔드
-   ├─ extract.py        # PDF/HWP/HWPX 텍스트 추출
+   ├─ extract.py        # PDF/HWP/HWPX 텍스트 추출(+노이즈 제거)
+   ├─ retrieval.py      # BM25 키워드 점수 + 하이브리드 결합
    ├─ embed.py          # 추출→청킹→임베딩→저장
-   └─ search.py         # 질의 임베딩→유사도 검색
+   ├─ search.py         # 질의 임베딩→하이브리드 검색
+   └─ evaluate.py       # 샘플 질의셋으로 품질 측정
 ```
 
 ## 동작 원리 (요약)
 
 1. **추출**: PDF는 PyMuPDF, HWPX는 XML 파싱, HWP(바이너리)는 OLE 스트림을
-   zlib 해제 후 `PARA_TEXT` 레코드에서 텍스트를 복원합니다.
-2. **청킹**: 문단 경계를 우선하여 문서를 겹치는 조각으로 나눕니다.
-3. **임베딩**: 각 조각을 모델로 벡터화하고 L2 정규화합니다.
-4. **검색**: 질문 벡터와 모든 조각 벡터의 내적(=코사인 유사도)으로 순위를 매깁니다.
+   zlib 해제 후 `PARA_TEXT` 레코드에서 텍스트를 복원합니다. 반복되는 머리말/꼬리말·
+   페이지번호는 임베딩 전에 제거합니다.
+2. **청킹**: 문단 경계를 우선하여 문서를 겹치는 조각으로 나눕니다(너무 짧은 조각은 버림).
+3. **임베딩**: 각 조각을 모델로 벡터화하고 L2 정규화합니다(hf_api 는 `POOLING` 로 CLS/mean 선택).
+4. **검색**: 질문의 **코사인 유사도**와 **키워드(BM25)** 점수를 각각 정규화해
+   `HYBRID_ALPHA` 로 가중 결합한 **하이브리드 점수**로 순위를 매깁니다.
+   법 조항·기관명·금액 같은 정확 일치 토큰을 키워드 쪽이 잡아 줍니다.
