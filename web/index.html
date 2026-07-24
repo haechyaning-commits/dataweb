@@ -559,13 +559,15 @@ function groupByDocument(qvec, query){
   return Object.values(best).sort((a,b)=>b.score-a.score);
 }
 
-// ===== 관련도 % = 코사인(의미) × 검색어 커버리지(실제 단어 출현) =====
-// 왜 코사인만으로 안 되나: e5 모델은 같은 한국어끼리면 주제가 전혀 달라도 코사인이
-// 0.80대로 높게 나온다. 그래서 코퍼스에 없는 주제(예: "집단따돌림")를 검색해도, 흔한
-// 단어 몇 개만 겹친 문서가 높게 표시됐다("그냥 겹치는 단어만 몇 개"의 정체).
-// 해결: 검색어의 핵심 단어가 그 문서에 실제로 얼마나 나오는지(coverage)를 곱한다.
-// 검색어 단어가 문서에 거의 없으면 코사인이 높아도 관련도는 낮게 나온다.
-const REL_LOW=0.80, REL_HIGH=0.87;
+// ===== 관련도 % = 0.6·검색어 커버리지 + 0.4·코사인(의미) =====  (곱이 아니라 '합')
+// 두 신호를 '더한다'. 곱으로 하면 코사인이 기준 미만일 때(모델을 바꾸면 코사인 범위가
+// 달라진다) 검색어가 문서에 다 들어 있어도 관련도가 0이 되어 "파일에 있는 내용인데 안
+// 나온다"는 문제가 생겼다. 합이면 둘 중 하나만 높아도 결과가 뜬다:
+//  · 검색어 단어가 문서에 실제로 있음(coverage↑) → 코사인과 무관하게 반드시 보임
+//  · 의미가 가까움(cos↑) → 다른 단어를 써도 보임
+//  · 둘 다 낮을 때만(단어도 없고 의미도 멀 때) 숨긴다 → 무관 junk 제거
+// REL_LOW/REL_HIGH 는 e5 계열(small/base/large) 공통으로 넉넉하게 잡음.
+const REL_LOW=0.75, REL_HIGH=0.86;
 const SHOW_MIN=25;  // 관련도 이 % 미만 결과는 아예 보여주지 않는다(무관 junk 숨김)
 // 검색어 토큰(불용어 제외, 한글 bigram 포함 → 조사 차이 흡수) 중 문서에 실제로 있는 비율.
 function queryCoverage(query, docText){
@@ -575,10 +577,10 @@ function queryCoverage(query, docText){
   let hit=0; for (const w of q) if (d.has(w)) hit++;
   return hit/q.size;
 }
-// 코사인을 절대구간으로 0~1 매핑한 뒤, 커버리지로 할인한다.
+// 코사인을 절대구간으로 0~1 매핑한 뒤, 커버리지와 '더한다'(둘 중 하나만 높아도 뜨게).
 function relatedness(cos, coverage){
   const relCos=Math.max(0, Math.min(1, (cos-REL_LOW)/(REL_HIGH-REL_LOW)));
-  return relCos*(0.2+0.8*coverage);
+  return 0.6*coverage + 0.4*relCos;
 }
 const matchPct = (cos, coverage) => Math.round(relatedness(cos, coverage)*100);
 
