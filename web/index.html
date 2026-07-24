@@ -597,15 +597,18 @@ async function runSearch(){
       const pct=matchPct(r.score);
       const full=(docTexts[it.source]||it.text);
       const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
-      // 이 문서와 비슷한 과거 지적/처분 문서(반복·유사 사례)
-      const similar=topSimilarDocs(docVecs, it.source, 3, 0.55);
-      const simHtml = similar.length
-        ? `<div class="similar" title="검색어와 무관하게, 이 문서와 내용이 비슷한 다른 문서입니다(반복·유사 지적 추적)">`
-          + `🔗 <b>비슷한 문서</b>: `
-          + similar.map(s=>`<button type="button" class="simchip chip" data-src="${esc(s.source)}">`
+      // 이 문서와 비슷한 과거 지적/처분 문서(반복·유사 사례). 검색어와 무관.
+      // 임계값(0.35) 이상 상위 3건. 섹션은 항상 표시하되, 없으면 "없음"을 명시.
+      const similar=topSimilarDocs(docVecs, it.source, 3, 0.35);
+      const onlyOne = docVecs.sources.length<=1;
+      const simBody = similar.length
+        ? similar.map(s=>`<button type="button" class="simchip chip" data-src="${esc(s.source)}">`
               + `${esc(s.source)} <span class="st-muted">${Math.round(s.score*100)}%</span></button>`).join(" ")
-          + `</div>`
-        : "";
+        : `<span class="st-muted">${onlyOne ? "문서가 1건이라 비교 대상 없음"
+            : "뚜렷하게 비슷한 문서 없음"}</span>`;
+      const simHtml=
+        `<div class="similar" title="검색어와 무관하게, 이 문서와 내용이 비슷한 다른 문서입니다(반복·유사 지적 추적). 클릭하면 원문을 아래에 펼쳐 대조합니다.">`
+        + `🔗 <b>비슷한 문서</b>: ${simBody}</div>`;
       const div=document.createElement("div"); div.className="res";
       div.innerHTML=
         `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
