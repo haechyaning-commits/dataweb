@@ -55,11 +55,21 @@
         max-height:340px;overflow:auto;padding:10px 12px;background:var(--chip);border-radius:9px}
   .toggle{border:none;background:transparent;color:var(--brand);cursor:pointer;font-size:14px;
         padding:0 4px 0 0;line-height:1}
-  .res .similar{margin:10px 0 0;padding-top:8px;border-top:1px dashed var(--line);
-        font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-  .simchip{border:1px solid var(--line);cursor:pointer;font-size:11px}
+  .simcard{margin:10px 0 0;padding:9px 11px;border:1px solid var(--line);border-radius:9px;
+        background:var(--chip)}
+  .simcard-h{font-size:12px;font-weight:600;color:var(--text);margin-bottom:6px}
+  .simcard-h .st-muted{font-weight:400}
+  .simlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+  .simlist li{display:flex;flex-direction:column;gap:2px}
+  .simchip{border:1px solid var(--line);cursor:pointer;font-size:12px;background:var(--card);
+        align-self:flex-start;text-align:left}
   .simchip:hover{border-color:var(--brand);color:var(--text)}
-  .res .simpanel{margin:6px 0 0}
+  .simchip b{color:var(--brand);font-variant-numeric:tabular-nums}
+  .evidence{font-size:11px;color:var(--muted);padding-left:4px;line-height:1.45}
+  .siminfo{font-size:12px}
+  .linklike{border:none;background:transparent;color:var(--brand);cursor:pointer;
+        text-decoration:underline;font-size:12px;padding:0}
+  .res .simpanel{margin:8px 0 0}
   mark{background:#fde68a;color:#111;border-radius:3px;padding:0 1px}
   @media (prefers-color-scheme: dark){ mark{background:#b7791f;color:#fff} }
   .note{font-size:12px;color:var(--muted)}
@@ -510,33 +520,24 @@ function groupByDocument(qvec){
 // 코사인 범위를 0~100%로 곧바로 매핑한다. 중앙값을 빼지 않으므로 감사문서처럼
 // 주제가 비슷한 코퍼스에서도 키워드/문맥 매칭이 정직하게 높은 %로 나온다.
 //   REL_LO 이하 → 0%,  REL_HI 이상 → 100%,  그 사이는 선형.
-const REL_LO=0.75;   // 이 코사인 이하는 사실상 무관
-const REL_HI=0.88;   // 이 코사인 이상은 뚜렷한 일치
-const WEAK_FLOOR=0.78; // 최고 코사인이 이보다 낮으면 "뚜렷한 일치 없음" 경고(절대 기준)
+const REL_LO=0.75;   // 이 코사인 이하는 사실상 무관 (관련도 0%)
+const REL_HI=0.88;   // 이 코사인 이상은 뚜렷한 일치 (관련도 100%)
 const relPct = s => Math.round(Math.max(0,Math.min(1,(s-REL_LO)/(REL_HI-REL_LO)))*100);
 
-/* ===== 유사 지적사항(문서-문서 유사도) ===== */
-// 문서마다 조각 벡터의 평균을 L2 정규화한 "문서 대표 벡터"를 만든다.
-// 검색어와 무관하게 문서끼리 얼마나 닮았는지 → 반복·유사 지적 사례를 찾는다.
-// (검색 모델 없이도, 인덱스 안 벡터만으로 계산되므로 차원 불일치 인덱스에서도 동작)
-function buildDocVectors(){
-  const sums={}; // source -> {vec:Float32Array, n}
-  for (const it of index){
-    const v=it.vector;
-    let acc=sums[it.source];
-    if (!acc){ acc=sums[it.source]={vec:new Float32Array(v.length), n:0}; }
-    for (let i=0;i<v.length;i++) acc.vec[i]+=v[i];
-    acc.n++;
-  }
-  const sources=[], vecs=[];
-  for (const s in sums){
-    const v=sums[s].vec; let norm=0;
-    for (let i=0;i<v.length;i++) norm+=v[i]*v[i];
-    norm=Math.sqrt(norm)||1;
-    for (let i=0;i<v.length;i++) v[i]/=norm;
-    sources.push(s); vecs.push(v);
-  }
-  return {sources, vecs};
+/* ===== 문맥기반 유사 문서(반복·유사 지적 추적) ===== */
+// 문서마다 "조각 벡터 목록"을 만든다. 문서 전체를 평균내면 특징이 지워지므로,
+// 문서끼리 비교할 때는 평균이 아니라 "가장 닮은 조각 쌍"으로 판정한다.
+// (검색어와 무관하게 내용만으로 비교 → 인덱스 안 벡터만 사용)
+function buildDocChunks(){
+  const m={}; // source -> [item, ...]
+  for (const it of index){ (m[it.source] || (m[it.source]=[])).push(it); }
+  return m;
+}
+// 유사도 %(relPct)를 강도 라벨로. 문맥 유사를 한눈에 구분하기 위함.
+function simLabel(pct){
+  if (pct>=70) return {icon:"🟢", txt:"강한 유사"};
+  if (pct>=40) return {icon:"🟡", txt:"관련"};
+  return {icon:"⚪", txt:"약한 관련"};
 }
 // 문서 원문 얻기: 저장된 원문 우선, 없으면 조각들을 순서대로 이어붙인다.
 function fullTextFor(source){
@@ -545,17 +546,24 @@ function fullTextFor(source){
     .sort((a,b)=>a.chunk-b.chunk).map(it=>it.text);
   return parts.join("\n") || source;
 }
-// selfSource 를 뺀 나머지 문서 중 유사도 상위 k개(threshold 이상)를 반환.
-function topSimilarDocs(docVecs, selfSource, k, threshold){
-  const idx=docVecs.sources.indexOf(selfSource);
-  if (idx<0) return [];
-  const base=docVecs.vecs[idx];
+// src 문서와 다른 문서들 간, "가장 닮은 조각 쌍"의 코사인으로 순위를 매겨 상위 k개.
+// evidence: 상대 문서에서 가장 닮은 조각(근거 구간)을 함께 돌려준다.
+function topSimilarByChunk(docChunks, src, k){
+  const mine=docChunks[src]||[];
   const out=[];
-  for (let j=0;j<docVecs.sources.length;j++){
-    if (docVecs.sources[j]===selfSource) continue;
-    const v=docVecs.vecs[j]; let dot=0;
-    for (let i=0;i<v.length;i++) dot+=v[i]*base[i];
-    if (dot>=threshold) out.push({source:docVecs.sources[j], score:dot});
+  for (const o in docChunks){
+    if (o===src || !mine.length) continue;
+    let best=-1, bestOther=null;
+    for (const b of docChunks[o]){
+      const vb=b.vector;
+      for (const a of mine){
+        const va=a.vector; let dot=0;
+        const n=Math.min(va.length, vb.length);
+        for (let i=0;i<n;i++) dot+=va[i]*vb[i];
+        if (dot>best){ best=dot; bestOther=b; }
+      }
+    }
+    out.push({source:o, score:best, evidence:bestOther});
   }
   return out.sort((a,b)=>b.score-a.score).slice(0,k);
 }
@@ -577,74 +585,97 @@ async function runSearch(){
       return;
     }
     const all=groupByDocument(qvec);                 // 전체 문서(정렬됨)
-    const topk=parseInt($("topk").value,10)||5;   // 무효값이면 5 (slice(0,NaN) 방지)
-    const ranked=all.slice(0,topk);
-    const box=$("results"); box.innerHTML="";
-    if (!ranked.length){ box.innerHTML='<p class="note">검색 결과가 없습니다.</p>'; return; }
-    box.insertAdjacentHTML("beforeend",
-      '<p class="note" style="margin:4px 0 10px">💡 문서 <b>한 개당 한 줄</b>로 정리했습니다(가장 관련 높은 구간 기준). '
-      + '<b>관련도 %</b>는 모델의 실제 유사도(코사인)를 고정범위로 환산한 값입니다'
-      + '(점수에 올리면 원점수 표시). 글자가 겹치지 않아도 <b>의미가 비슷하면</b> 높게 나옵니다. '
-      + '<mark>노란색</mark>은 검색어 위치, 오른쪽 <b>▸</b>는 본문 전체 보기입니다.</p>');
-    // 최고 코사인이 절대 기준(WEAK_FLOOR) 미만이면 "뚜렷한 일치 없음" 안내.
-    // (중앙값이 아닌 절대값 기준이라, 좋은 문맥 매칭을 잘못 경고하지 않는다)
-    if (all[0].score < WEAK_FLOOR){
+    const topk=parseInt($("topk").value,10)||5;      // 무효값이면 5 (slice(0,NaN) 방지)
+    const REL_CUT=70;                                // 관련도 70% 미만은 숨김
+    const docChunks=buildDocChunks();                // 유사 문서 판정용(1회)
+    const nDocs=Object.keys(docChunks).length;
+    const box=$("results");
+    if (!all.length){ box.innerHTML='<p class="note">검색 결과가 없습니다.</p>'; return; }
+
+    // 검색 결과를 그린다. revealAll=true 면 70% 미만도 포함.
+    function paint(revealAll){
+      box.innerHTML="";
       box.insertAdjacentHTML("beforeend",
-        '<p class="note st-warn" style="margin:0 0 10px">🔸 뚜렷하게 일치하는 문서가 없어 보입니다 '
-        + '(관련도가 모두 낮음). 검색어와 실제로 관련된 문서가 없을 수 있습니다.</p>');
-    }
-    const docVecs=buildDocVectors();           // 유사 지적사항 계산용(1회)
-    ranked.forEach((r,i)=>{
-      const it=r.it;
-      const chunkLabel = it.nChunks>1 ? `관련 구간 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
-      const pct=relPct(r.score);
-      const full=(docTexts[it.source]||it.text);
-      const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
-      // 이 문서와 비슷한 과거 지적/처분 문서(반복·유사 사례). 검색어와 무관.
-      // 임계값(0.35) 이상 상위 3건. 섹션은 항상 표시하되, 없으면 "없음"을 명시.
-      const similar=topSimilarDocs(docVecs, it.source, 3, 0.35);
-      const onlyOne = docVecs.sources.length<=1;
-      const simBody = similar.length
-        ? similar.map(s=>`<button type="button" class="simchip chip" data-src="${esc(s.source)}">`
-              + `${esc(s.source)} <span class="st-muted">${Math.round(s.score*100)}%</span></button>`).join(" ")
-        : `<span class="st-muted">${onlyOne ? "문서가 1건이라 비교 대상 없음"
-            : "뚜렷하게 비슷한 문서 없음"}</span>`;
-      const simHtml=
-        `<div class="similar" title="검색어와 무관하게, 이 문서와 내용이 비슷한 다른 문서입니다(반복·유사 지적 추적). 클릭하면 원문을 아래에 펼쳐 대조합니다.">`
-        + `🔗 <b>비슷한 문서</b>: ${simBody}</div>`;
-      const div=document.createElement("div"); div.className="res";
-      div.innerHTML=
-        `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
-        + `<b>[${i+1}] ${esc(it.source)}</b> <span class="chip" title="문서 안에서 검색어와 가장 관련 높은 구간입니다">${chunkLabel}</span></span>`
-        + `<span class="score" title="원점수(코사인) ${(r.score*100).toFixed(1)}%">관련도 ${pct}%</span></h4>`
-        + `<p class="preview">${highlight(preview,q)}</p>`
-        + simHtml
-        + `<div class="fulltext" style="display:none">${highlight(full,q)}</div>`;
-      const btn=div.querySelector(".toggle");
-      const ft=div.querySelector(".fulltext");
-      const pv=div.querySelector(".preview");
-      btn.addEventListener("click",()=>{
-        const open=ft.style.display==="none";
-        ft.style.display=open?"block":"none";
-        pv.style.display=open?"none":"block";
-        btn.textContent=open?"▾":"▸";
-        btn.setAttribute("aria-label",open?"접기":"펼치기");
-      });
-      // 비슷한 문서 칩 클릭 → 해당 문서 원문을 이 결과 아래에 펼쳐서 대조
-      div.querySelectorAll(".simchip").forEach(chip=>{
-        chip.addEventListener("click",()=>{
-          const src=chip.getAttribute("data-src");
-          let panel=div.querySelector(`.simpanel[data-src="${CSS.escape(src)}"]`);
-          if (panel){ panel.remove(); return; }  // 토글: 다시 누르면 닫힘
-          panel=document.createElement("div");
-          panel.className="simpanel"; panel.setAttribute("data-src",src);
-          panel.innerHTML=`<div class="note st-muted" style="margin:6px 0 2px">📄 ${esc(src)} 원문</div>`
-            + `<div class="fulltext" style="display:block">${highlight(fullTextFor(src),q)}</div>`;
-          div.appendChild(panel);
+        '<p class="note" style="margin:4px 0 10px">💡 관련도 <b>70% 이상</b> 문서만 표시합니다'
+        + '(점수에 올리면 원점수). 각 문서 아래 <b>🔗 문맥 기반 유사 문서</b>는 <b>검색어와 무관하게</b> '
+        + '내용이 비슷한 파일입니다(반복·유사 지적 추적). <mark>노란색</mark>=검색어 위치, <b>▸</b>=본문 전체.</p>');
+
+      const pool = revealAll ? all : all.filter(r=>relPct(r.score)>=REL_CUT);
+      if (!pool.length){
+        box.insertAdjacentHTML("beforeend",
+          '<p class="note st-warn" style="margin:0">🔸 관련도 <b>70% 이상</b>인 문서가 없습니다. '
+          + '검색어와 뚜렷이 일치하는 문서가 없을 수 있습니다. '
+          + '<button type="button" id="revealBtn" class="linklike">낮은 관련 결과도 보기</button></p>');
+        const rb=$("revealBtn"); if (rb) rb.addEventListener("click",()=>paint(true));
+        return;
+      }
+      const ranked=pool.slice(0,topk);
+      ranked.forEach((r,i)=>{
+        const it=r.it;
+        const chunkLabel = it.nChunks>1 ? `관련 구간 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
+        const pct=relPct(r.score);
+        const full=(docTexts[it.source]||it.text);
+        const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
+
+        // 문맥 기반 유사 문서 상위 5건 — "가장 닮은 조각 쌍"으로 판정, 근거 구간 포함.
+        const similar = nDocs>1 ? topSimilarByChunk(docChunks, it.source, 5) : [];
+        let simInner;
+        if (nDocs<=1){
+          simInner='<div class="siminfo st-muted">문서가 1건이라 비교 대상이 없습니다.</div>';
+        } else if (!similar.length){
+          simInner='<div class="siminfo st-muted">비교할 다른 문서가 없습니다.</div>';
+        } else {
+          simInner='<ul class="simlist">'+similar.map(s=>{
+            const sp=relPct(s.score), lb=simLabel(sp);
+            const ev=((s.evidence&&s.evidence.text)||"").replace(/\s+/g," ").trim();
+            const evShort=ev.length>90?ev.slice(0,90)+"…":ev;
+            return `<li><button type="button" class="simchip chip" data-src="${esc(s.source)}" `
+              + `title="클릭하면 이 문서 원문을 아래에 펼쳐 대조합니다">`
+              + `${lb.icon} ${esc(s.source)} <b>${sp}%</b> <span class="st-muted">${lb.txt}</span></button>`
+              + (evShort?`<div class="evidence">닮은 대목: “${highlight(evShort,q)}”</div>`:"")
+              + `</li>`;
+          }).join("")+'</ul>';
+        }
+        const simHtml=
+          '<div class="simcard">'
+          + '<div class="simcard-h">🔗 문맥 기반 유사 문서 <span class="st-muted">· 검색어와 무관, 내용이 비슷한 순</span></div>'
+          + simInner + '</div>';
+
+        const div=document.createElement("div"); div.className="res";
+        div.innerHTML=
+          `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
+          + `<b>[${i+1}] ${esc(it.source)}</b> <span class="chip" title="문서 안에서 검색어와 가장 관련 높은 구간입니다">${chunkLabel}</span></span>`
+          + `<span class="score" title="원점수(코사인) ${(r.score*100).toFixed(1)}%">관련도 ${pct}%</span></h4>`
+          + `<p class="preview">${highlight(preview,q)}</p>`
+          + simHtml
+          + `<div class="fulltext" style="display:none">${highlight(full,q)}</div>`;
+        const btn=div.querySelector(".toggle");
+        const ft=div.querySelector(".fulltext");
+        const pv=div.querySelector(".preview");
+        btn.addEventListener("click",()=>{
+          const open=ft.style.display==="none";
+          ft.style.display=open?"block":"none";
+          pv.style.display=open?"none":"block";
+          btn.textContent=open?"▾":"▸";
+          btn.setAttribute("aria-label",open?"접기":"펼치기");
         });
+        // 유사 문서 칩 클릭 → 해당 문서 원문을 이 결과 아래에 펼쳐서 대조
+        div.querySelectorAll(".simchip").forEach(chip=>{
+          chip.addEventListener("click",()=>{
+            const src=chip.getAttribute("data-src");
+            let panel=div.querySelector(`.simpanel[data-src="${CSS.escape(src)}"]`);
+            if (panel){ panel.remove(); return; }  // 토글: 다시 누르면 닫힘
+            panel=document.createElement("div");
+            panel.className="simpanel"; panel.setAttribute("data-src",src);
+            panel.innerHTML=`<div class="note st-muted" style="margin:6px 0 2px">📄 ${esc(src)} 원문</div>`
+              + `<div class="fulltext" style="display:block">${highlight(fullTextFor(src),q)}</div>`;
+            div.appendChild(panel);
+          });
+        });
+        box.appendChild(div);
       });
-      box.appendChild(div);
-    });
+    }
+    paint(false);
   }finally{ $("searchBtn").disabled=false; }
 }
 $("searchBtn").addEventListener("click",runSearch);
