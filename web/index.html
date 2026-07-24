@@ -70,6 +70,13 @@
   .linklike{border:none;background:transparent;color:var(--brand);cursor:pointer;
         text-decoration:underline;font-size:12px;padding:0}
   .res .simpanel{margin:8px 0 0}
+  .tag{display:inline-block;font-size:11px;background:var(--chip);color:var(--brand);
+        border:1px solid var(--line);padding:1px 8px;border-radius:999px;white-space:nowrap}
+  .tagbtn{cursor:pointer}
+  .tagbtn:hover{border-color:var(--brand)}
+  .tagbtn.on{background:var(--brand);color:#fff;border-color:var(--brand)}
+  .tagcell{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+  .restags{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 0}
   mark{background:#fde68a;color:#111;border-radius:3px;padding:0 1px}
   @media (prefers-color-scheme: dark){ mark{background:#b7791f;color:#fff} }
   .note{font-size:12px;color:var(--muted)}
@@ -109,7 +116,7 @@
       <button class="ghost" id="clearDocs">목록 비우기</button>
     </div>
     <table id="docTable" style="display:none">
-      <thead><tr><th>문서</th><th>형식</th><th>글자수</th><th>상태</th></tr></thead>
+      <thead><tr><th>문서</th><th>형식</th><th>글자수</th><th>태그</th><th>상태</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -194,6 +201,7 @@ if (window.pdfjsLib) {
 const docs = [];      // {name, ext, text, status}
 let index = [];       // {source, chunk, nChunks, text, vector:Float32Array}
 let docTexts = {};    // {문서이름: 전체 본문} — 결과 펼치기에서 사용
+let docTags = {};     // {문서이름: [태그,...]} — 자동추출 태그(필터/열람용)
 let lastQuery = "";   // 하이라이트용 마지막 검색어
 let extractor = null; // transformers.js 파이프라인
 let indexModel = "Xenova/multilingual-e5-small"; // 현재 인덱스를 만든 모델
@@ -405,8 +413,9 @@ function renderDocs(){
   $("docTable").style.display = docs.length?"table":"none";
   for (const d of docs){
     const tr=document.createElement("tr");
+    const tagCell = d.tags&&d.tags.length ? tagChips(d.tags) : '<span class="st-muted">-</span>';
     tr.innerHTML=`<td>${esc(d.name)}</td><td><span class="chip">${d.ext.toUpperCase()}</span></td>
-      <td>${d.text?d.text.length.toLocaleString():"-"}</td><td class="${d.cls}">${d.status}</td>`;
+      <td>${d.text?d.text.length.toLocaleString():"-"}</td><td class="tagcell">${tagCell}</td><td class="${d.cls}">${d.status}</td>`;
     tb.appendChild(tr);
   }
   const ready=docs.some(d=>d.text && d.text.length);
@@ -416,6 +425,43 @@ function renderDocs(){
 }
 function esc(s){ return s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 
+/* ================= 문서 태그 자동추출 ================= */
+// 감사문서 성격에 맞춘 규칙 기반 태그. 파일명·본문에서 문서유형/연도/주제어를 뽑는다.
+// (모델 불필요 · 완전 로컬 · 결정적) — 필터(④)와 결과 열람에 사용.
+const TAG_TYPES = {  // 문서유형: 태그 → 본문/파일명에 나타나는 표현들
+  "처분요구서":["처분요구"], "지적사항":["지적사항","지적"], "성과감사":["성과감사"],
+  "일상감사":["일상감사"], "감사보고서":["결과보고서","감사보고서","감사 결과보고"],
+  "시정요구":["시정"], "주의요구":["주의요구","주의"], "통보":["통보"],
+  "개선요구":["개선"], "경고":["경고"],
+};
+const TAG_TOPICS = { // 주제어: 태그 → 동의/관련 표현들
+  "수의계약":["수의계약","수의로 계약"], "경쟁입찰":["경쟁입찰","입찰"],
+  "예산":["예산"], "시간외근로":["시간외근로","초과근무","연장근로","야간근로","특근"],
+  "모성보호":["임산부","임신","모성","육아휴직"], "복리후생":["복리후생","경조금","매식비","할인증"],
+  "출장비":["출장비","출장"], "전용통신망":["전용통신망","통신 요금","통신장비"],
+  "방만경영":["방만경영"], "계약관리":["계약관리","계약 관리"],
+  "산업재해":["재해","산업재해","사고조사"], "환수":["환수"], "복리후생비":["복리후생비"],
+};
+function extractTags(name, text){
+  const hay = (name+" "+(text||""));
+  const matched=(dict)=>Object.entries(dict)
+    .filter(([,forms])=>forms.some(f=>hay.includes(f))).map(([tag])=>tag);
+  const types  = matched(TAG_TYPES).slice(0,3);   // 문서유형 최대 3개
+  const topics = matched(TAG_TOPICS).slice(0,4);  // 주제어 최대 4개
+  const y = (name.match(/(19|20)\d{2}/) || (text||"").match(/(19|20)\d{2}/));
+  const tags=[...types];
+  if (y) tags.push(y[0]);                          // 연도
+  for (const t of topics) if (!tags.includes(t)) tags.push(t);
+  return tags;
+}
+function tagChips(tags, opts){
+  if (!tags || !tags.length) return "";
+  const cls = (opts&&opts.filter) ? "tag tagbtn" : "tag";
+  const el  = (opts&&opts.filter) ? "button" : "span";
+  const attr= (opts&&opts.filter) ? ' type="button"' : "";
+  return tags.map(t=>`<${el}${attr} class="${cls}" data-tag="${esc(t)}">${esc(t)}</${el}>`).join(" ");
+}
+
 async function addFiles(fileList){
   for (const f of fileList){
     const ext=(f.name.split(".").pop()||"").toLowerCase();
@@ -424,7 +470,7 @@ async function addFiles(fileList){
     try{
       const buf=await f.arrayBuffer();
       d.text=await extractText(f.name,buf);
-      if (d.text.length){ d.status="추출 완료 ✓"; d.cls="st-ok"; }
+      if (d.text.length){ d.status="추출 완료 ✓"; d.cls="st-ok"; d.tags=extractTags(d.name,d.text); docTags[d.name]=d.tags; }
       else { d.status="텍스트 없음(스캔본?)"; d.cls="st-err"; }
     }catch(e){ d.status="실패: "+e.message; d.cls="st-err"; }
     renderDocs();
@@ -438,13 +484,15 @@ $("file").addEventListener("change",e=>addFiles(e.target.files));
 ["dragleave","drop"].forEach(ev=>$("drop").addEventListener(ev,e=>{e.preventDefault();$("drop").classList.remove("over");}));
 $("drop").addEventListener("drop",e=>{ if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
 
-$("clearDocs").addEventListener("click",()=>{ docs.length=0; renderDocs(); });
+$("clearDocs").addEventListener("click",()=>{ docs.length=0; docTags={}; renderDocs(); });
 
 $("loadSamples").addEventListener("click",()=>{
   const samples=JSON.parse($("samples").textContent);
   for (const s of samples){
+    const text=tidy(s.text), tags=extractTags(s.name,text);
     docs.push({name:s.name,ext:(s.name.split(".").pop()||"").toLowerCase(),
-               text:tidy(s.text),status:"추출 완료 ✓(내장 샘플)",cls:"st-ok"});
+               text,tags,status:"추출 완료 ✓(내장 샘플)",cls:"st-ok"});
+    docTags[s.name]=tags;
   }
   renderDocs();
 });
@@ -460,6 +508,7 @@ $("embedBtn").addEventListener("click",async()=>{
     for (const d of docs){
       if (!d.text) continue;
       docTexts[d.name]=d.text;
+      docTags[d.name]=d.tags||extractTags(d.name,d.text);
       const cs = split ? chunkText(d.text) : [d.text];  // 체크 해제 시 문서 통째로 1벡터
       cs.forEach((c,i)=>jobs.push({source:d.name,chunk:i,nChunks:cs.length,text:c}));
     }
@@ -641,11 +690,14 @@ async function runSearch(){
           + '<div class="simcard-h">🔗 문맥 기반 유사 문서 <span class="st-muted">· 검색어와 무관, 내용이 비슷한 순</span></div>'
           + simInner + '</div>';
 
+        const tagsHtml = (docTags[it.source]&&docTags[it.source].length)
+          ? `<div class="restags">${tagChips(docTags[it.source])}</div>` : "";
         const div=document.createElement("div"); div.className="res";
         div.innerHTML=
           `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
           + `<b>[${i+1}] ${esc(it.source)}</b> <span class="chip" title="문서 안에서 검색어와 가장 관련 높은 구간입니다">${chunkLabel}</span></span>`
           + `<span class="score" title="원점수(코사인) ${(r.score*100).toFixed(1)}%">관련도 ${pct}%</span></h4>`
+          + tagsHtml
           + `<p class="preview">${highlight(preview,q)}</p>`
           + simHtml
           + `<div class="fulltext" style="display:none">${highlight(full,q)}</div>`;
@@ -683,7 +735,7 @@ $("q").addEventListener("keydown",e=>{ if (e.key==="Enter") runSearch(); });
 
 /* ---- 인덱스 저장/불러오기 ---- */
 $("saveIndex").addEventListener("click",()=>{
-  const data={model:"Xenova/multilingual-e5-small", docTexts,
+  const data={model:"Xenova/multilingual-e5-small", docTexts, docTags,
     items:index.map(it=>({source:it.source,chunk:it.chunk,nChunks:it.nChunks,text:it.text,vector:Array.from(it.vector)}))};
   const blob=new Blob([JSON.stringify(data)],{type:"application/json"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
@@ -695,6 +747,9 @@ $("indexFile").addEventListener("change",async e=>{
   const data=JSON.parse(await f.text());
   index=data.items.map(it=>({...it,vector:Float32Array.from(it.vector)}));
   docTexts=data.docTexts||{};
+  // 태그: 저장돼 있으면 사용, 없으면(구버전 인덱스) 본문에서 다시 추출
+  docTags=data.docTags||{};
+  for (const src in docTexts){ if (!docTags[src]) docTags[src]=extractTags(src,docTexts[src]); }
   indexModel=data.model||BROWSER_MODEL;
   $("searchBtn").disabled=false; $("saveIndex").disabled=false;
   const dim=index.length?index[0].vector.length:0;
