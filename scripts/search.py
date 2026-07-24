@@ -25,7 +25,9 @@ import json
 
 import numpy as np
 
-from common import INDEX_PATH, EMBEDDING_MODEL, HYBRID_ALPHA, embed_texts, eprint
+from common import (
+    INDEX_PATH, EMBEDDING_MODEL, HYBRID_ALPHA, MIN_RELEVANCE, embed_texts, eprint,
+)
 from retrieval import BM25, hybrid_scores, tokenize
 
 
@@ -47,6 +49,7 @@ def parse_args(argv: list[str]):
     top_k = 5
     as_json = False
     alpha = HYBRID_ALPHA
+    min_rel = MIN_RELEVANCE
     query_parts: list[str] = []
     i = 0
     while i < len(argv):
@@ -55,16 +58,18 @@ def parse_args(argv: list[str]):
             top_k = int(argv[i + 1]); i += 2; continue
         if a == "--alpha" and i + 1 < len(argv):
             alpha = float(argv[i + 1]); i += 2; continue
+        if a == "--min" and i + 1 < len(argv):
+            min_rel = float(argv[i + 1]); i += 2; continue
         if a == "--json":
             as_json = True; i += 1; continue
         query_parts.append(a); i += 1
-    return " ".join(query_parts).strip(), top_k, as_json, alpha
+    return " ".join(query_parts).strip(), top_k, as_json, alpha, min_rel
 
 
 def main() -> int:
-    query, top_k, as_json, alpha = parse_args(sys.argv[1:])
+    query, top_k, as_json, alpha, min_rel = parse_args(sys.argv[1:])
     if not query:
-        eprint('Usage: search.bat "your question"  [--top N] [--alpha 0..1] [--json]')
+        eprint('Usage: search.bat "your question"  [--top N] [--alpha 0..1] [--min 0..1] [--json]')
         return 1
 
     vectors, metas = load_index()
@@ -79,7 +84,11 @@ def main() -> int:
         bm25 = BM25([tokenize(t) for t in corpus])
         final = hybrid_scores(dense, bm25.scores(query), alpha)
 
-    order = list(np.argsort(-np.asarray(final))[:top_k])
+    # Rank by hybrid score, but only KEEP results whose semantic (dense cosine)
+    # relevance clears the gate. This is what stops "겹치는 단어 몇 개"뿐인 무관
+    # 문서 from showing up — the show/hide decision is meaning-based, not keyword.
+    ranked = list(np.argsort(-np.asarray(final)))
+    order = [i for i in ranked if dense[i] >= min_rel][:top_k]
 
     # --- rerank hook: reorder `order` here with a cross-encoder if desired ---
 
@@ -93,11 +102,21 @@ def main() -> int:
     } for rank, i in enumerate(order)]
 
     if as_json:
-        print(json.dumps({"query": query, "results": results}, ensure_ascii=False, indent=2))
+        print(json.dumps(
+            {"query": query, "min_relevance": min_rel, "results": results},
+            ensure_ascii=False, indent=2))
+        return 0
+
+    if not results:
+        best = max(dense) if dense else 0.0
+        print(f"\n🔎 Query: {query}\n" + "=" * 70)
+        print(f"관련 문서를 찾지 못했습니다. 가장 가까운 문서도 의미 유사도가 "
+              f"{best:.3f} 로 기준({min_rel:.2f}) 미만입니다.")
+        print("→ 검색어와 실제로 관련된 문서가 없거나, 기준값(--min)이 높을 수 있습니다.")
         return 0
 
     mode = "vector" if alpha >= 1.0 else f"hybrid α={alpha:g}"
-    print(f"\n🔎 Query: {query}  ({mode})\n" + "=" * 70)
+    print(f"\n🔎 Query: {query}  ({mode}, min≥{min_rel:.2f})\n" + "=" * 70)
     for r in results:
         print(f"[{r['rank']}] score={r['score']:.4f} (cos {r['cosine']:.4f})  "
               f"{r['source']}  (chunk {r['chunk']})")

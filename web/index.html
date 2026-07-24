@@ -554,6 +554,7 @@ function groupByDocument(qvec, query){
 // 해결: 검색어의 핵심 단어가 그 문서에 실제로 얼마나 나오는지(coverage)를 곱한다.
 // 검색어 단어가 문서에 거의 없으면 코사인이 높아도 관련도는 낮게 나온다.
 const REL_LOW=0.80, REL_HIGH=0.87;
+const SHOW_MIN=25;  // 관련도 이 % 미만 결과는 아예 보여주지 않는다(무관 junk 숨김)
 // 검색어 토큰(불용어 제외, 한글 bigram 포함 → 조사 차이 흡수) 중 문서에 실제로 있는 비율.
 function queryCoverage(query, docText){
   const q=new Set(tokenizeKo(query));
@@ -577,30 +578,32 @@ async function runSearch(){
     await ensureModel();
     const qvec=await embed(q,true);
     const all=groupByDocument(qvec, q);              // 하이브리드 순위(정렬됨)
-    const ranked=all.slice(0,parseInt($("topk").value,10));
+    // 각 문서의 관련도(의미 위주 + 커버리지)를 구하고, 기준 미만은 아예 버린다.
+    const scored=all.map(r=>{
+      const full=(docTexts[r.it.source]||r.it.text);
+      const cov=queryCoverage(q, full);
+      return {...r, cov, pct:matchPct(r.cos, cov)};
+    });
+    const shown=scored.filter(r=>r.pct>=SHOW_MIN).slice(0,parseInt($("topk").value,10));
     const box=$("results"); box.innerHTML="";
-    if (!ranked.length){ box.innerHTML='<p class="note">검색 결과가 없습니다.</p>'; return; }
-    box.insertAdjacentHTML("beforeend",
-      '<p class="note" style="margin:4px 0 10px">💡 문서 <b>한 개당 한 줄</b>로 정리했습니다(가장 관련 높은 구간 기준). '
-      + '순위는 <b>임베딩 + 키워드(BM25) 하이브리드</b>로 매깁니다. '
-      + '<b>관련도 %</b>는 의미 유사도와 <b>검색어 단어가 문서에 실제로 나오는 정도</b>를 함께 반영합니다. '
-      + '검색어가 문서에 거의 없으면 <b>관련도가 낮게</b> 나옵니다. '
-      + '<mark>노란색</mark>은 검색어 위치, 오른쪽 <b>▸</b>는 본문 전체 보기입니다.</p>');
-    // 최상위 문서조차 검색어 단어가 거의 없으면 "관련 문서 없음"을 정직하게 알린다.
-    const topFull=(docTexts[all[0].it.source]||all[0].it.text);
-    const topCov=queryCoverage(q, topFull);
-    if (matchPct(all[0].cos, topCov) < 30 || topCov < 0.34){
-      box.insertAdjacentHTML("beforeend",
-        '<p class="note st-warn" style="margin:0 0 10px">🔸 검색어와 뚜렷하게 일치하는 문서가 없습니다 '
-        + '— 검색어의 핵심 단어가 문서에 거의 나오지 않습니다. 겹치는 단어 몇 개로 올라온 결과일 수 있으니 '
-        + '실제 관련 여부를 직접 확인하세요.</p>');
+    // 기준을 넘는 문서가 하나도 없으면 억지로 보여주지 않고 "없음"을 말한다.
+    if (!shown.length){
+      box.innerHTML='<p class="note st-warn" style="margin:4px 0">🔸 검색어와 관련된 문서를 찾지 못했습니다. '
+        + '검색어와 실제로 관련된 문서가 없거나, 이 브라우저 데모 모델(경량)의 의미 이해 한계일 수 있습니다.</p>'
+        + '<p class="note">💡 한국어 감사문서의 <b>문맥 기반 검색</b> 품질을 높이려면 파이썬 경로'
+        + '(<code>KURE-v1</code>/<code>bge-m3</code> 로컬 모델)를 쓰세요 — README 참고.</p>';
+      return;
     }
-    ranked.forEach((r,i)=>{
+    box.insertAdjacentHTML("beforeend",
+      '<p class="note" style="margin:4px 0 10px">💡 문서 <b>한 개당 한 줄</b>. 순위는 <b>의미(임베딩) 위주</b>로 매기고, '
+      + `관련도 <b>${SHOW_MIN}% 미만</b>은 숨깁니다. `
+      + '<mark>노란색</mark>은 검색어 위치, 오른쪽 <b>▸</b>는 본문 전체 보기입니다. '
+      + '<span class="st-muted">이 데모는 경량 모델이라 의미 이해에 한계가 있습니다 — 정밀 검색은 파이썬 경로 권장.</span></p>');
+    shown.forEach((r,i)=>{
       const it=r.it;
       const chunkLabel = it.nChunks>1 ? `관련 구간 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
+      const cov=r.cov, pct=r.pct;
       const full=(docTexts[it.source]||it.text);
-      const cov=queryCoverage(q, full);
-      const pct=matchPct(r.cos, cov);
       const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
       const div=document.createElement("div"); div.className="res";
       div.innerHTML=

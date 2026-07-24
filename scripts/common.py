@@ -57,10 +57,18 @@ PASSAGE_PREFIX = os.getenv("PASSAGE_PREFIX", "")
 POOLING = os.getenv("POOLING", "cls").strip().lower()
 
 # Hybrid search: final score = HYBRID_ALPHA * dense + (1 - HYBRID_ALPHA) * bm25.
-# 1.0 = pure vector search (old behaviour), 0.0 = pure keyword (BM25).
-# Audit text is full of exact tokens (법 조항·기관명·금액) that dense vectors miss,
-# so a keyword component materially helps — see docs/DIAGNOSIS.md C.
-HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.6"))
+# 1.0 = pure vector search, 0.0 = pure keyword (BM25). With a strong Korean model
+# (bge-m3 / KURE) the meaning (dense) signal should lead, so default high; keyword
+# is only a supplement for exact tokens (법 조항·기관명·금액). See docs/DIAGNOSIS.md C.
+HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.75"))
+
+# Relevance gate (semantic). A result is shown only if its raw dense cosine is at
+# least MIN_RELEVANCE — this is what hides "겹치는 단어 몇 개"뿐인 무관 문서. The
+# ranking still uses the hybrid score, but the *decision to show* is purely
+# semantic (context), not keyword overlap. Tune per model:
+#   bge-m3 / KURE-v1 : ~0.45-0.55  (relevant pairs land ~0.55-0.70)
+#   multilingual-e5  : ~0.80       (e5 cosines sit in a high, narrow band)
+MIN_RELEVANCE = float(os.getenv("MIN_RELEVANCE", "0.5"))
 
 # Chunking (characters, not tokens — good enough for a demo corpus).
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))

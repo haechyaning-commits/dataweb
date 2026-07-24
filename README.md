@@ -44,15 +44,18 @@
 copy .env.example .env
 ```
 
-`.env` 를 열어 Hugging Face 토큰을 넣습니다
-(발급: https://huggingface.co/settings/tokens — Read 권한이면 충분):
+기본값은 **한국어 특화 모델을 이 PC에서 직접 실행**하도록 되어 있습니다
+(`.env` 의 `EMBEDDING_BACKEND=local`, `EMBEDDING_MODEL=nlpai-lab/KURE-v1`).
+**Hugging Face 토큰이 필요 없습니다.** 최초 1회 모델(수 GB)을 자동으로 내려받습니다.
 
-```
-HUGGINGFACEHUB_API_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx
-```
+- **KURE-v1**: 한국어 검색 특화(bge-m3 파인튜닝) — 감사/행정 문맥 검색에 권장
+- **bge-m3**: 다국어(한국어 강함), 범용 대안
 
-> 파이썬(3.9+)만 설치돼 있으면 됩니다. 나머지 패키지는 `embedding.bat` 이
-> 최초 실행 때 자동으로 `.venv` 에 설치합니다.
+> 파이썬(3.9+)만 있으면 됩니다. `sentence-transformers` 등 패키지는 `embedding.bat`
+> 이 최초 실행 때 자동으로 `.venv` 에 설치합니다(로컬 모델 실행 라이브러리 포함).
+>
+> 설치가 부담되면 `.env` 에서 `EMBEDDING_BACKEND=hf_api` 로 바꾸고 HF 토큰
+> (`HUGGINGFACEHUB_API_TOKEN=hf_...`)만 넣어도 됩니다(로컬 설치는 가벼워짐).
 
 ## 2. 임베딩 (색인 생성)
 
@@ -70,12 +73,19 @@ embedding.bat
 ```bat
 search.bat "임산부 시간외근로"
 search.bat --top 3 "전용통신망 수의계약 케이티"
+search.bat --min 0.6 "방만경영 예산통제"      :: 관련성 기준을 더 엄격하게
 search.bat --alpha 1.0 "방만경영 예산통제"   :: 순수 벡터검색으로 비교
 search.bat --json "방만경영 예산통제"
 ```
 
-→ 질문을 같은 모델로 임베딩한 **코사인 유사도**와 **키워드(BM25)** 점수를 결합한
-**하이브리드 순위**로 문서 조각을 보여줍니다. `--alpha 1.0` 이면 순수 벡터검색입니다.
+→ 질문을 같은 모델로 임베딩한 **코사인 유사도**와 **키워드(BM25)** 를 결합한
+**하이브리드 순위**로 보여줍니다. `--alpha 1.0` 이면 순수 벡터검색입니다.
+
+**관련성 게이트(중요):** 결과를 **보여줄지 말지는 순수하게 의미(코사인) 유사도**로
+결정합니다. `MIN_RELEVANCE`(기본 0.5) 미만인 문서는 — 검색어와 단어가 몇 개 겹치더라도 —
+**아예 표시하지 않습니다.** 관련 문서가 하나도 없으면 "관련 문서를 찾지 못했습니다"라고
+알립니다. 기준은 `.env` 의 `MIN_RELEVANCE` 또는 `--min` 으로 조정합니다
+(KURE-v1/bge-m3 는 0.45~0.55, e5 계열은 0.8 근처).
 
 ## 4. 검색 품질 평가 (개선 전/후 비교)
 
@@ -101,8 +111,8 @@ python scripts\evaluate.py --alpha 0.5
 
 | 모델 | 특징 | 언제 |
 |------|------|------|
-| `BAAI/bge-m3` (기본) | 다국어(한국어 강함), 8192토큰 긴 문맥, dense 검색 | 범용 권장 |
-| `nlpai-lab/KURE-v1` | 한국어 검색 특화(bge-m3 파인튜닝) | 한국어만 다룰 때 |
+| `nlpai-lab/KURE-v1` (기본) | 한국어 검색 특화(bge-m3 파인튜닝) | **한국어 감사문서 문맥검색 권장** |
+| `BAAI/bge-m3` | 다국어(한국어 강함), 8192토큰 긴 문맥, dense 검색 | 다국어가 섞일 때 |
 | `intfloat/multilingual-e5-large` | 다국어 e5 | e5 계열 선호 시(아래 프리픽스 필요) |
 
 > e5 계열은 `.env` 에서 `QUERY_PREFIX=query:` / `PASSAGE_PREFIX=passage:` 로 설정하세요.
@@ -110,9 +120,10 @@ python scripts\evaluate.py --alpha 0.5
 
 ## 백엔드 선택 (`EMBEDDING_BACKEND`)
 
-- `hf_api` (기본): Hugging Face 서버에 요청. **토큰 필요**, 로컬 GPU 불필요.
-- `local`: 이 PC에서 직접 실행. 토큰 불필요·오프라인 가능하지만 최초 1회 모델을
-  내려받습니다. `requirements.txt` 의 `sentence-transformers` 주석을 해제해 설치하세요.
+- `local` (기본): 이 PC에서 직접 실행. **토큰 불필요**·오프라인 가능. 최초 1회 모델(수 GB)을
+  내려받습니다. `sentence-transformers` 가 필요합니다(`embedding.bat` 이 자동 설치).
+  **한국어 특화 모델(KURE/bge-m3)은 이 백엔드를 권장** — 모델 고유 풀링을 그대로 써서 정확합니다.
+- `hf_api`: Hugging Face 서버에 요청. 토큰 필요, 로컬 설치 가벼움.
 
 ## 스캔본 PDF (OCR)
 
@@ -153,6 +164,7 @@ dataweb/
    페이지번호는 임베딩 전에 제거합니다.
 2. **청킹**: 문단 경계를 우선하여 문서를 겹치는 조각으로 나눕니다(너무 짧은 조각은 버림).
 3. **임베딩**: 각 조각을 모델로 벡터화하고 L2 정규화합니다(hf_api 는 `POOLING` 로 CLS/mean 선택).
-4. **검색**: 질문의 **코사인 유사도**와 **키워드(BM25)** 점수를 각각 정규화해
-   `HYBRID_ALPHA` 로 가중 결합한 **하이브리드 점수**로 순위를 매깁니다.
-   법 조항·기관명·금액 같은 정확 일치 토큰을 키워드 쪽이 잡아 줍니다.
+4. **검색**: 질문의 **코사인 유사도**와 **키워드(BM25)** 를 결합한 **하이브리드 점수**로
+   순위를 매깁니다(법 조항·기관명·금액 같은 정확 일치는 키워드가 보완). 단, **결과를
+   보여줄지 말지는 순수하게 의미(코사인) 유사도**로 판단해, `MIN_RELEVANCE` 미만인 무관
+   문서는 숨깁니다 — "단어만 겹치는" 문서가 올라오지 않게 합니다.
