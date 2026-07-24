@@ -473,12 +473,17 @@ $("embedBtn").addEventListener("click",async()=>{
    순수 임베딩은 법 조항·기관명·금액 같은 정확 일치 토큰에 약하다. 한국어는
    어절 + 한글 문자 bigram 으로 토큰화해(형태소 분석기 없이) 조사 차이를 흡수한다. */
 const HYBRID_ALPHA = 0.6;   // 최종점수 = α·임베딩 + (1-α)·키워드
+// 흔한 기능어/일반어 — 이런 단어의 겹침은 관련성을 뜻하지 않으므로 키워드 점수에서 뺀다.
+// (감사 도메인 용어는 넣지 않는다: '조치·시정·감사' 등은 실제 검색어라 남겨 둠)
+const STOP=new Set(["있는","없는","하는","되는","있다","없다","한다","된다","관련","관한",
+  "대한","대하여","위한","위하여","통한","통하여","및","등","등의","또는","그리고","그러나",
+  "경우","때문","해당","각각","이하","이상","부터","까지","에서","으로","같은","따라","또한"]);
 function tokenizeKo(text){
   const t=(text||"").toLowerCase();
   const out=(t.match(/[0-9a-z가-힣]+/g)||[]).slice();
   for (const run of (t.match(/[가-힣]{2,}/g)||[]))
     for (let i=0;i<run.length-1;i++) out.push(run.slice(i,i+2));
-  return out;
+  return out.filter(w=>!STOP.has(w));
 }
 let _bm25=null;  // 인덱스가 바뀌면 rebuildBM25()로 무효화
 function rebuildBM25(){ _bm25=null; }
@@ -544,11 +549,14 @@ function groupByDocument(qvec, query){
 
 // 원점수(코사인)를 "관련도 %"로 보정. 이 검색어에 대한 전체 문서의 기준선(중앙값)을
 // 빼서, 두드러지게 높은 문서만 높은 %가 되게 한다 → 관련 없으면 0%에 가까움.
-const MATCH_MARGIN=0.12; // 기준선보다 이만큼 높으면 관련도 100%
-function median(arr){
-  const b=[...arr].sort((x,y)=>x-y); const m=b.length>>1;
-  return b.length ? (b.length%2 ? b[m] : (b[m-1]+b[m])/2) : 0;
-}
+// 관련도 %는 코사인의 "절대 구간"으로 매핑한다(중앙값 기준 아님).
+//  e5 모델은 같은 한국어끼리면 주제가 전혀 달라도 코사인이 0.75~0.82대로 높다.
+//  "중앙값보다 튀는 정도"로 %를 매기면, 코퍼스에 없는 주제(예: 집단따돌림)를 검색해도
+//  흔한 단어 몇 개만 겹친 문서가 '튀어서' 70%로 표시된다 → 거짓 관련도.
+//  그래서 REL_LOW 이하는 0%(사실상 무관), REL_HIGH 이상만 100%로 본다.
+const REL_LOW=0.80, REL_HIGH=0.87;
+const matchPct = cos =>
+  Math.round(Math.max(0, Math.min(1, (cos-REL_LOW)/(REL_HIGH-REL_LOW)))*100);
 
 async function runSearch(){
   const q=$("q").value.trim(); if (!q || !index.length) return;
@@ -558,8 +566,6 @@ async function runSearch(){
     await ensureModel();
     const qvec=await embed(q,true);
     const all=groupByDocument(qvec, q);              // 하이브리드 순위(정렬됨)
-    const baseline = all.length>=3 ? median(all.map(r=>r.cos)) : 0.75;
-    const matchPct = s => Math.round(Math.max(0,Math.min(1,(s-baseline)/MATCH_MARGIN))*100);
     const ranked=all.slice(0,parseInt($("topk").value,10));
     const box=$("results"); box.innerHTML="";
     if (!ranked.length){ box.innerHTML='<p class="note">검색 결과가 없습니다.</p>'; return; }
@@ -568,11 +574,11 @@ async function runSearch(){
       + '순위는 <b>임베딩 + 키워드(BM25) 하이브리드</b>로 매깁니다. '
       + '<b>관련도 %</b>는 검색어와의 관련 정도를 보정한 값으로, <b>관련이 없으면 0%</b>에 가깝습니다. '
       + '<mark>노란색</mark>은 검색어 위치, 오른쪽 <b>▸</b>는 본문 전체 보기입니다.</p>');
-    // 최고 관련도가 낮으면 "뚜렷한 일치 없음" 안내
-    if (matchPct(all[0].cos) < 15){
+    // 최고 관련도가 낮으면 "뚜렷한 일치 없음" 안내 (절대 코사인 기준이라 정직함)
+    if (matchPct(all[0].cos) < 30){
       box.insertAdjacentHTML("beforeend",
-        '<p class="note st-warn" style="margin:0 0 10px">🔸 뚜렷하게 일치하는 문서가 없어 보입니다 '
-        + '(관련도가 모두 낮음). 검색어와 실제로 관련된 문서가 없을 수 있습니다.</p>');
+        '<p class="note st-warn" style="margin:0 0 10px">🔸 검색어와 뚜렷하게 일치하는 문서가 없습니다 '
+        + '(가장 가까운 문서도 관련도가 낮음). 겹치는 단어 몇 개로 올라온 결과일 수 있으니 실제 관련 여부를 확인하세요.</p>');
     }
     ranked.forEach((r,i)=>{
       const it=r.it;

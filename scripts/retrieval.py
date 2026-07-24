@@ -31,13 +31,23 @@ from collections import Counter
 _WORD_RE = re.compile(r"[0-9A-Za-z가-힣]+")
 _HANGUL_RUN_RE = re.compile(r"[가-힣]{2,}")
 
+# Common function/filler words. Overlap on these signals nothing about relevance,
+# so we drop them from keyword scoring. Domain terms (조치·시정·감사 …) are NOT
+# listed — those are legitimate query words. Kept in sync with web/index.html STOP.
+_STOP = {
+    "있는", "없는", "하는", "되는", "있다", "없다", "한다", "된다", "관련", "관한",
+    "대한", "대하여", "위한", "위하여", "통한", "통하여", "및", "등", "등의", "또는",
+    "그리고", "그러나", "경우", "때문", "해당", "각각", "이하", "이상", "부터", "까지",
+    "에서", "으로", "같은", "따라", "또한",
+}
+
 
 def tokenize(text: str) -> list[str]:
     text = text.lower()
     tokens = _WORD_RE.findall(text)
     for run in _HANGUL_RUN_RE.findall(text):
         tokens.extend(run[i:i + 2] for i in range(len(run) - 1))
-    return tokens
+    return [t for t in tokens if t not in _STOP]
 
 
 # ---------------------------------------------------------------------------
