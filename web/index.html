@@ -115,6 +115,11 @@
       <button class="ghost" id="loadSamples">샘플 감사문서 4건 불러오기</button>
       <button class="ghost" id="clearDocs">목록 비우기</button>
     </div>
+    <label class="note" style="display:flex;align-items:center;gap:7px;margin-top:10px;cursor:pointer">
+      <input type="checkbox" id="ocrEnable" />
+      <span><b>스캔본 PDF는 OCR로 글자 인식</b>(텍스트가 없는 이미지 PDF일 때만.
+      느리고, 최초 1회 인식엔진·한국어 데이터를 내려받습니다 — 인터넷 필요)</span>
+    </label>
     <table id="docTable" style="display:none">
       <thead><tr><th>문서</th><th>형식</th><th>글자수</th><th>태그</th><th>상태</th></tr></thead>
       <tbody></tbody>
@@ -159,7 +164,8 @@
   <p class="note">
     ⓘ 이 페이지는 <b>완전히 로컬</b>에서 실행됩니다. 문서 내용은 브라우저 밖으로 전송되지 않습니다.
     임베딩 모델과 라이브러리는 최초 실행 시 CDN에서 내려받으며(인터넷 필요), 이후 브라우저 캐시로 재사용됩니다.<br />
-    라이브러리: transformers.js · pdf.js · JSZip · pako &nbsp;|&nbsp; HWP(바이너리)는 이 페이지에 내장된 파서로 직접 추출합니다.
+    라이브러리: transformers.js · pdf.js · JSZip · pako &nbsp;|&nbsp; HWP(바이너리)는 이 페이지에 내장된 파서로 직접 추출합니다.<br />
+    스캔본 PDF의 OCR은 옵션을 켰을 때만 tesseract.js(한국어+영어)를 추가로 내려받아 인식합니다.
   </p>
 </div>
 
@@ -228,6 +234,43 @@ async function extractPdf(buf) {
     const c = await page.getTextContent();
     out += c.items.map((i) => i.str).join(" ") + "\n";
   }
+  return out;
+}
+
+/* ---- OCR (스캔본 PDF): tesseract.js 를 필요할 때만 CDN 에서 로드 ---- */
+let _tesseract=null;
+async function ensureTesseract(){
+  if (_tesseract) return _tesseract;
+  await new Promise((res,rej)=>{
+    const s=document.createElement("script");
+    s.src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+    s.onload=res;
+    s.onerror=()=>rej(new Error("OCR 엔진 로드 실패 — 인터넷 연결/CDN 접근을 확인하세요"));
+    document.head.appendChild(s);
+  });
+  _tesseract=window.Tesseract;
+  if (!_tesseract) throw new Error("OCR 엔진을 초기화할 수 없습니다");
+  return _tesseract;
+}
+// PDF 각 페이지를 이미지로 렌더한 뒤 한국어+영어 OCR. onStatus 로 진행상황 보고.
+async function ocrPdf(buf, onStatus){
+  const T=await ensureTesseract();
+  onStatus && onStatus("OCR 엔진·한국어 데이터 준비 중…");
+  const worker=await T.createWorker("kor+eng");
+  let out="";
+  try{
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    for (let p=1;p<=pdf.numPages;p++){
+      onStatus && onStatus(`OCR 인식 중… ${p}/${pdf.numPages}페이지`);
+      const page=await pdf.getPage(p);
+      const viewport=page.getViewport({scale:2});   // 정확도를 위해 2배 확대
+      const canvas=document.createElement("canvas");
+      canvas.width=viewport.width; canvas.height=viewport.height;
+      await page.render({canvasContext:canvas.getContext("2d"), viewport}).promise;
+      const {data}=await worker.recognize(canvas);
+      out+=(data.text||"")+"\n";
+    }
+  } finally { await worker.terminate(); }
   return out;
 }
 
@@ -470,8 +513,21 @@ async function addFiles(fileList){
     try{
       const buf=await f.arrayBuffer();
       d.text=await extractText(f.name,buf);
-      if (d.text.length){ d.status="추출 완료 ✓"; d.cls="st-ok"; d.tags=extractTags(d.name,d.text); docTags[d.name]=d.tags; }
-      else { d.status="텍스트 없음(스캔본?)"; d.cls="st-err"; }
+      let usedOcr=false;
+      // 텍스트가 거의 없는 PDF = 스캔본. OCR 옵션이 켜져 있으면 이미지 인식.
+      if (d.ext==="pdf" && d.text.trim().length<15 && $("ocrEnable").checked){
+        try{
+          const buf2=await f.arrayBuffer();  // getDocument 가 버퍼를 소비하므로 다시 읽음
+          d.text=tidy(await ocrPdf(buf2,(m)=>{ d.status=m; d.cls="st-warn"; renderDocs(); }));
+          usedOcr=true;
+        }catch(e){ d.status="OCR 실패: "+e.message; d.cls="st-err"; renderDocs(); }
+      }
+      if (d.text.trim().length){
+        d.status="추출 완료 ✓"+(usedOcr?" (OCR)":""); d.cls="st-ok";
+        d.tags=extractTags(d.name,d.text); docTags[d.name]=d.tags;
+      } else if (d.ext==="pdf" && !$("ocrEnable").checked){
+        d.status="텍스트 없음(스캔본?) — OCR 옵션을 켜보세요"; d.cls="st-err";
+      } else if (!usedOcr){ d.status="텍스트 없음"; d.cls="st-err"; }
     }catch(e){ d.status="실패: "+e.message; d.cls="st-err"; }
     renderDocs();
   }
