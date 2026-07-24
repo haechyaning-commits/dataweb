@@ -181,6 +181,9 @@ let index = [];       // {source, chunk, nChunks, text, vector:Float32Array}
 let docTexts = {};    // {문서이름: 전체 본문} — 결과 펼치기에서 사용
 let lastQuery = "";   // 하이라이트용 마지막 검색어
 let extractor = null; // transformers.js 파이프라인
+let indexModel = "Xenova/multilingual-e5-small"; // 현재 인덱스를 만든 모델
+const BROWSER_MODEL = "Xenova/multilingual-e5-small"; // 브라우저가 질의를 임베딩하는 모델
+const BROWSER_DIM = 384; // 위 모델의 벡터 차원
 
 const $ = (id) => document.getElementById(id);
 
@@ -512,6 +515,15 @@ async function runSearch(){
   try{
     await ensureModel();
     const qvec=await embed(q,true);
+    // 인덱스가 다른 모델(차원)로 만들어졌으면 내적이 무의미하므로 검색을 막는다.
+    if (index.length && index[0].vector.length !== qvec.length){
+      $("results").innerHTML=
+        '<p class="note st-err">이 인덱스는 브라우저 검색 모델과 다른 모델('
+        + esc(indexModel) + `, ${index[0].vector.length}차원)로 만들어졌습니다. `
+        + `브라우저 검색 모델은 ${qvec.length}차원이라 의미검색을 할 수 없습니다.<br>`
+        + '→ 문서 <b>열람</b>은 되지만, <b>의미검색</b>은 파이썬 <code>search.bat</code> 을 사용하세요.</p>';
+      return;
+    }
     const all=groupByDocument(qvec);                 // 전체 문서(정렬됨)
     const baseline = all.length>=3 ? median(all.map(r=>r.score)) : 0.75;
     const matchPct = s => Math.round(Math.max(0,Math.min(1,(s-baseline)/MATCH_MARGIN))*100);
@@ -572,9 +584,18 @@ $("indexFile").addEventListener("change",async e=>{
   const data=JSON.parse(await f.text());
   index=data.items.map(it=>({...it,vector:Float32Array.from(it.vector)}));
   docTexts=data.docTexts||{};
+  indexModel=data.model||BROWSER_MODEL;
   $("searchBtn").disabled=false; $("saveIndex").disabled=false;
-  $("embedStatus").textContent=`인덱스 불러옴 ✓ ${index.length}개 조각. 바로 검색할 수 있습니다.`;
-  $("embedStatus").className="note st-ok";
+  const dim=index.length?index[0].vector.length:0;
+  const mismatch=dim && dim!==BROWSER_DIM;
+  if (mismatch){
+    $("embedStatus").innerHTML=`인덱스 불러옴 ✓ ${index.length}개 조각 (모델 ${esc(indexModel)}, ${dim}차원). `
+      + `이 모델은 브라우저 검색 모델과 달라 <b>열람만</b> 가능합니다 — 의미검색은 <code>search.bat</code> 을 사용하세요.`;
+    $("embedStatus").className="note st-warn";
+  } else {
+    $("embedStatus").textContent=`인덱스 불러옴 ✓ ${index.length}개 조각. 바로 검색할 수 있습니다.`;
+    $("embedStatus").className="note st-ok";
+  }
 });
 </script>
 </body>

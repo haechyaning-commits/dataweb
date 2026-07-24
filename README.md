@@ -30,11 +30,50 @@
 
 ---
 
-## 방법 B — 배치 스크립트
+## 방법 B — 배치 스크립트 (고품질 한국어 · 감사실 정식 운영 권장)
+
+브라우저(방법 A)는 가벼운 다국어 모델을 쓰기 때문에 대량 문서에서 느리고,
+**고차원 한국어 특화 모델은 브라우저에서 감당하지 못합니다.** 감사실에서
+품질 좋게 쓰려면 이 경로로 **한국어 특화 1024차원 `nlpai-lab/KURE-v1`** 을
+오프라인·무토큰으로 돌리는 것을 권장합니다.
 
 - **문서 → 임베딩**: `embedding.bat`
 - **질문 → 검색**: `search.bat`
+- **인덱스 → 웹 배포**: `python scripts\export_web.py` (아래 참고)
 - **설정/키**: `.env`
+
+### 오프라인·무토큰 KURE-v1 설정 (권장)
+
+`.env.example` 을 복사하면 이미 아래 프로필이 기본으로 들어 있습니다:
+
+```
+EMBEDDING_MODEL=nlpai-lab/KURE-v1
+EMBEDDING_BACKEND=local
+```
+
+로컬 실행용 패키지를 설치합니다(최초 1회 모델 ~2GB 자동 다운로드, GPU 자동 사용):
+
+```bat
+pip install -r requirements-local.txt
+```
+
+이후 인터넷·토큰 없이 `embedding.bat` → `search.bat "검색어"` 로 동작합니다.
+
+### 인덱스를 웹페이지로 배포/열람 (공용 인덱스)
+
+담당자가 KURE-v1 로 만든 인덱스를 팀에 나눠줄 수 있습니다:
+
+```bat
+embedding.bat
+python scripts\export_web.py     REM -> web\index.json 생성
+```
+
+동료는 `web/index.html` 을 열고 **`인덱스 불러오기`** 로 `index.json` 을
+읽으면 파이썬·모델 다운로드 없이 문서를 **열람**할 수 있습니다.
+
+> ⚠️ KURE(1024차원)로 만든 인덱스는 브라우저 검색 모델(e5-small, 384차원)과
+> 차원이 달라 **브라우저 의미검색은 되지 않습니다**(열람만 가능). 의미검색은
+> `search.bat` 을 사용하세요. e5-small 로 만든 인덱스는 브라우저에서도 검색됩니다.
 
 ---
 
@@ -94,7 +133,8 @@ search.bat --json "방만경영 예산통제"
 
 - `hf_api` (기본): Hugging Face 서버에 요청. **토큰 필요**, 로컬 GPU 불필요.
 - `local`: 이 PC에서 직접 실행. 토큰 불필요·오프라인 가능하지만 최초 1회 모델을
-  내려받습니다. `requirements.txt` 의 `sentence-transformers` 주석을 해제해 설치하세요.
+  내려받습니다. `pip install -r requirements-local.txt` 로 설치하세요.
+  GPU가 있으면 자동으로 사용합니다(`EMBEDDING_DEVICE` 로 강제 지정 가능).
 
 ## 스캔본 PDF (OCR)
 
@@ -114,14 +154,16 @@ dataweb/
 ├─ embedding.bat        # 임베딩 실행(가상환경 자동 구성)
 ├─ search.bat           # 검색 실행
 ├─ .env / .env.example  # 설정·키 (.env 는 git 에 올라가지 않음)
-├─ requirements.txt
+├─ requirements.txt        # hf_api 백엔드용
+├─ requirements-local.txt  # local 백엔드용(오프라인 KURE-v1 등)
 ├─ data/                # 원본 문서(샘플 포함)
 ├─ index/              # 생성된 벡터 인덱스(index.npz)
 └─ scripts/
-   ├─ common.py         # 설정 + 임베딩 백엔드
+   ├─ common.py         # 설정 + 임베딩 백엔드(GPU 자동 감지)
    ├─ extract.py        # PDF/HWP/HWPX 텍스트 추출
    ├─ embed.py          # 추출→청킹→임베딩→저장
-   └─ search.py         # 질의 임베딩→유사도 검색
+   ├─ search.py         # 질의 임베딩→유사도 검색
+   └─ export_web.py     # index.npz → web/index.json (웹 배포)
 ```
 
 ## 동작 원리 (요약)

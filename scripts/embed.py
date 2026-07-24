@@ -50,6 +50,7 @@ def main() -> int:
 
     texts: list[str] = []
     metas: list[dict] = []
+    doc_texts: dict[str, str] = {}
 
     for path in files:
         try:
@@ -62,6 +63,7 @@ def main() -> int:
             eprint(f"[warn] {path.name}: no extractable text "
                    f"(scanned image? set ENABLE_OCR=1) — skipped")
             continue
+        doc_texts[path.name] = raw
         for idx, chunk in enumerate(chunks):
             texts.append(chunk)
             metas.append({
@@ -69,6 +71,7 @@ def main() -> int:
                 "path": str(path),
                 "chunk": idx,
                 "n_chunks": len(chunks),
+                "text": chunk,
                 "preview": chunk[:200].replace("\n", " "),
             })
         eprint(f"[ok]   {path.name}: {len(chunks)} chunk(s)")
@@ -86,6 +89,7 @@ def main() -> int:
         INDEX_PATH,
         vectors=vectors,
         metas=np.array(json.dumps(metas, ensure_ascii=False)),
+        doc_texts=np.array(json.dumps(doc_texts, ensure_ascii=False)),
         model=np.array(EMBEDDING_MODEL),
     )
     eprint("-" * 60)

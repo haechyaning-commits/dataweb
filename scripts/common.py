@@ -69,6 +69,22 @@ BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "16"))
 _local_model = None  # lazy-loaded sentence-transformers model
 
 
+def _pick_device() -> str:
+    """Prefer GPU when available; fall back to CPU. Overridable via EMBEDDING_DEVICE."""
+    forced = os.getenv("EMBEDDING_DEVICE", "").strip().lower()
+    if forced:
+        return forced
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:  # noqa: BLE001 - torch missing/broken -> just use CPU
+        pass
+    return "cpu"
+
+
 def _embed_local(texts: list[str]) -> np.ndarray:
     global _local_model
     if _local_model is None:
@@ -77,10 +93,16 @@ def _embed_local(texts: list[str]) -> np.ndarray:
         except ImportError as e:  # pragma: no cover
             raise RuntimeError(
                 "EMBEDDING_BACKEND=local needs sentence-transformers.\n"
-                "Install with: pip install sentence-transformers"
+                "Install with: pip install -r requirements-local.txt\n"
+                "(or: pip install sentence-transformers)"
             ) from e
-        eprint(f"[local] loading {EMBEDDING_MODEL} (first run downloads it)...")
-        _local_model = SentenceTransformer(EMBEDDING_MODEL)
+        device = _pick_device()
+        eprint(f"[local] loading {EMBEDDING_MODEL} on {device} "
+               f"(first run downloads the model — KURE-v1 is ~2GB)...")
+        _local_model = SentenceTransformer(EMBEDDING_MODEL, device=device)
+        if device == "cpu":
+            eprint("[local] running on CPU — 대량 문서는 시간이 걸립니다. "
+                   "GPU가 있으면 자동으로 사용합니다.")
     vecs = _local_model.encode(
         texts, batch_size=BATCH_SIZE, normalize_embeddings=True,
         show_progress_bar=False,
