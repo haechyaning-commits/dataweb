@@ -55,6 +55,11 @@
         max-height:340px;overflow:auto;padding:10px 12px;background:var(--chip);border-radius:9px}
   .toggle{border:none;background:transparent;color:var(--brand);cursor:pointer;font-size:14px;
         padding:0 4px 0 0;line-height:1}
+  .res .similar{margin:8px 0 0;font-size:12px;color:var(--muted);display:flex;
+        flex-wrap:wrap;gap:6px;align-items:center}
+  .simchip{border:1px solid var(--line);cursor:pointer;font-size:11px}
+  .simchip:hover{border-color:var(--brand);color:var(--text)}
+  .res .simpanel{margin:6px 0 0}
   mark{background:#fde68a;color:#111;border-radius:3px;padding:0 1px}
   @media (prefers-color-scheme: dark){ mark{background:#b7791f;color:#fff} }
   .note{font-size:12px;color:var(--muted)}
@@ -508,6 +513,51 @@ function median(arr){
   return b.length ? (b.length%2 ? b[m] : (b[m-1]+b[m])/2) : 0;
 }
 
+/* ===== 유사 지적사항(문서-문서 유사도) ===== */
+// 문서마다 조각 벡터의 평균을 L2 정규화한 "문서 대표 벡터"를 만든다.
+// 검색어와 무관하게 문서끼리 얼마나 닮았는지 → 반복·유사 지적 사례를 찾는다.
+// (검색 모델 없이도, 인덱스 안 벡터만으로 계산되므로 차원 불일치 인덱스에서도 동작)
+function buildDocVectors(){
+  const sums={}; // source -> {vec:Float32Array, n}
+  for (const it of index){
+    const v=it.vector;
+    let acc=sums[it.source];
+    if (!acc){ acc=sums[it.source]={vec:new Float32Array(v.length), n:0}; }
+    for (let i=0;i<v.length;i++) acc.vec[i]+=v[i];
+    acc.n++;
+  }
+  const sources=[], vecs=[];
+  for (const s in sums){
+    const v=sums[s].vec; let norm=0;
+    for (let i=0;i<v.length;i++) norm+=v[i]*v[i];
+    norm=Math.sqrt(norm)||1;
+    for (let i=0;i<v.length;i++) v[i]/=norm;
+    sources.push(s); vecs.push(v);
+  }
+  return {sources, vecs};
+}
+// 문서 원문 얻기: 저장된 원문 우선, 없으면 조각들을 순서대로 이어붙인다.
+function fullTextFor(source){
+  if (docTexts[source]) return docTexts[source];
+  const parts=index.filter(it=>it.source===source)
+    .sort((a,b)=>a.chunk-b.chunk).map(it=>it.text);
+  return parts.join("\n") || source;
+}
+// selfSource 를 뺀 나머지 문서 중 유사도 상위 k개(threshold 이상)를 반환.
+function topSimilarDocs(docVecs, selfSource, k, threshold){
+  const idx=docVecs.sources.indexOf(selfSource);
+  if (idx<0) return [];
+  const base=docVecs.vecs[idx];
+  const out=[];
+  for (let j=0;j<docVecs.sources.length;j++){
+    if (docVecs.sources[j]===selfSource) continue;
+    const v=docVecs.vecs[j]; let dot=0;
+    for (let i=0;i<v.length;i++) dot+=v[i]*base[i];
+    if (dot>=threshold) out.push({source:docVecs.sources[j], score:dot});
+  }
+  return out.sort((a,b)=>b.score-a.score).slice(0,k);
+}
+
 async function runSearch(){
   const q=$("q").value.trim(); if (!q || !index.length) return;
   lastQuery=q;
@@ -540,18 +590,29 @@ async function runSearch(){
         '<p class="note st-warn" style="margin:0 0 10px">🔸 뚜렷하게 일치하는 문서가 없어 보입니다 '
         + '(관련도가 모두 낮음). 검색어와 실제로 관련된 문서가 없을 수 있습니다.</p>');
     }
+    const docVecs=buildDocVectors();           // 유사 지적사항 계산용(1회)
     ranked.forEach((r,i)=>{
       const it=r.it;
       const chunkLabel = it.nChunks>1 ? `관련 구간 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
       const pct=matchPct(r.score);
       const full=(docTexts[it.source]||it.text);
       const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
+      // 이 문서와 비슷한 과거 지적/처분 문서(반복·유사 사례)
+      const similar=topSimilarDocs(docVecs, it.source, 3, 0.55);
+      const simHtml = similar.length
+        ? `<div class="similar" title="검색어와 무관하게, 이 문서와 내용이 비슷한 다른 문서입니다(반복·유사 지적 추적)">`
+          + `🔗 <b>비슷한 문서</b>: `
+          + similar.map(s=>`<button type="button" class="simchip chip" data-src="${esc(s.source)}">`
+              + `${esc(s.source)} <span class="st-muted">${Math.round(s.score*100)}%</span></button>`).join(" ")
+          + `</div>`
+        : "";
       const div=document.createElement("div"); div.className="res";
       div.innerHTML=
         `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
         + `<b>[${i+1}] ${esc(it.source)}</b> <span class="chip" title="문서 안에서 검색어와 가장 관련 높은 구간입니다">${chunkLabel}</span></span>`
         + `<span class="score" title="원점수(코사인) ${(r.score*100).toFixed(1)}%">관련도 ${pct}%</span></h4>`
         + `<p class="preview">${highlight(preview,q)}</p>`
+        + simHtml
         + `<div class="fulltext" style="display:none">${highlight(full,q)}</div>`;
       const btn=div.querySelector(".toggle");
       const ft=div.querySelector(".fulltext");
@@ -562,6 +623,19 @@ async function runSearch(){
         pv.style.display=open?"none":"block";
         btn.textContent=open?"▾":"▸";
         btn.setAttribute("aria-label",open?"접기":"펼치기");
+      });
+      // 비슷한 문서 칩 클릭 → 해당 문서 원문을 이 결과 아래에 펼쳐서 대조
+      div.querySelectorAll(".simchip").forEach(chip=>{
+        chip.addEventListener("click",()=>{
+          const src=chip.getAttribute("data-src");
+          let panel=div.querySelector(`.simpanel[data-src="${CSS.escape(src)}"]`);
+          if (panel){ panel.remove(); return; }  // 토글: 다시 누르면 닫힘
+          panel=document.createElement("div");
+          panel.className="simpanel"; panel.setAttribute("data-src",src);
+          panel.innerHTML=`<div class="note st-muted" style="margin:6px 0 2px">📄 ${esc(src)} 원문</div>`
+            + `<div class="fulltext" style="display:block">${highlight(fullTextFor(src),q)}</div>`;
+          div.appendChild(panel);
+        });
       });
       box.appendChild(div);
     });
