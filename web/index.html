@@ -121,8 +121,10 @@
     <div class="row" style="margin-top:12px">
       <button class="ghost" id="saveIndex" disabled>인덱스 저장(.json)</button>
       <button class="ghost" id="loadIndexBtn">인덱스 불러오기</button>
+      <button class="ghost" id="clearSaved" style="display:none">저장된 인덱스 지우기</button>
       <input id="indexFile" type="file" accept=".json" style="display:none" />
     </div>
+    <div class="note" style="margin-top:8px">💾 임베딩하면 <b>이 브라우저에 자동 저장</b>됩니다 — 다음에 페이지를 다시 열면 재임베딩 없이 바로 검색할 수 있어요.</div>
   </div>
 
   <!-- 3. 검색 -->
@@ -473,6 +475,7 @@ $("embedBtn").addEventListener("click",async()=>{
     $("embedStatus").className="note st-ok";
     $("searchBtn").disabled=false;
     $("saveIndex").disabled=false;
+    idbSave();  // 이 브라우저에 자동 저장 → 다음에 열면 재임베딩 없이 검색
   }catch(e){
     $("embedStatus").textContent="오류: "+e.message+" (인터넷 연결/CDN 접근을 확인하세요)";
     $("embedStatus").className="note st-err";
@@ -653,7 +656,63 @@ $("modelSel").addEventListener("change",()=>{
   }
 });
 
-/* ---- 인덱스 저장/불러오기 ---- */
+/* ---- 브라우저 자동 저장 (IndexedDB) ----
+   벡터가 커서 localStorage(문자열·5MB) 대신 IndexedDB 를 쓴다. Float32Array 는
+   structured clone 으로 그대로 저장되므로 변환 없이 담고 꺼낸다. */
+const DB_NAME="dataweb-idx", STORE="kv", KEY="index";
+function idbOpen(){
+  return new Promise((res,rej)=>{
+    const r=indexedDB.open(DB_NAME,1);
+    r.onupgradeneeded=()=>r.result.createObjectStore(STORE);
+    r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error);
+  });
+}
+function snapshot(){
+  return {model:loadedModel||selectedModel(), docTexts,
+    items:index.map(it=>({source:it.source,chunk:it.chunk,nChunks:it.nChunks,text:it.text,vector:it.vector}))};
+}
+async function idbSave(){
+  try{
+    const db=await idbOpen();
+    await new Promise((res,rej)=>{
+      const tx=db.transaction(STORE,"readwrite");
+      tx.objectStore(STORE).put(snapshot(),KEY);
+      tx.oncomplete=res; tx.onerror=()=>rej(tx.error);
+    });
+    db.close(); $("clearSaved").style.display="";
+  }catch(e){ console.warn("자동 저장 실패(용량 초과 등):",e); }
+}
+async function idbLoad(){
+  try{
+    const db=await idbOpen();
+    const obj=await new Promise((res,rej)=>{
+      const g=db.transaction(STORE,"readonly").objectStore(STORE).get(KEY);
+      g.onsuccess=()=>res(g.result); g.onerror=()=>rej(g.error);
+    });
+    db.close(); return obj||null;
+  }catch(e){ return null; }
+}
+async function idbClear(){
+  try{ const db=await idbOpen();
+    await new Promise(res=>{ const tx=db.transaction(STORE,"readwrite"); tx.objectStore(STORE).delete(KEY); tx.oncomplete=res; });
+    db.close();
+  }catch(e){}
+}
+function applyIndex(data, whereMsg){
+  index=data.items.map(it=>({...it,
+    vector: it.vector instanceof Float32Array ? it.vector : Float32Array.from(it.vector)}));
+  rebuildBM25();
+  docTexts=data.docTexts||{};
+  // 인덱스는 특정 모델로 만든 벡터다. 질의도 같은 모델로 임베딩해야 하므로 셀렉터를 맞춘다.
+  if (data.model && [...$("modelSel").options].some(o=>o.value===data.model)){
+    $("modelSel").value=data.model; loadedModel=null; extractor=null;
+  }
+  $("searchBtn").disabled=false; $("saveIndex").disabled=false;
+  $("embedStatus").textContent=`${whereMsg} ✓ ${index.length}개 조각 (모델: ${data.model||"?"}). 바로 검색할 수 있습니다.`;
+  $("embedStatus").className="note st-ok";
+}
+
+/* ---- 인덱스 저장(.json)/불러오기 ---- */
 $("saveIndex").addEventListener("click",()=>{
   const data={model:loadedModel||selectedModel(), docTexts,
     items:index.map(it=>({source:it.source,chunk:it.chunk,nChunks:it.nChunks,text:it.text,vector:Array.from(it.vector)}))};
@@ -665,17 +724,24 @@ $("loadIndexBtn").addEventListener("click",()=>$("indexFile").click());
 $("indexFile").addEventListener("change",async e=>{
   const f=e.target.files[0]; if (!f) return;
   const data=JSON.parse(await f.text());
-  index=data.items.map(it=>({...it,vector:Float32Array.from(it.vector)}));
-  rebuildBM25();  // loaded a different index → invalidate keyword stats
-  docTexts=data.docTexts||{};
-  // 인덱스는 특정 모델로 만든 벡터다. 질의도 같은 모델로 임베딩해야 하므로 셀렉터를 맞춘다.
-  if (data.model && [...$("modelSel").options].some(o=>o.value===data.model)){
-    $("modelSel").value=data.model; loadedModel=null; extractor=null;
-  }
-  $("searchBtn").disabled=false; $("saveIndex").disabled=false;
-  $("embedStatus").textContent=`인덱스 불러옴 ✓ ${index.length}개 조각 (모델: ${data.model||"?"}). 바로 검색할 수 있습니다.`;
-  $("embedStatus").className="note st-ok";
+  applyIndex(data, "인덱스 불러옴");
+  idbSave();  // 불러온 것도 브라우저에 자동 저장
 });
+$("clearSaved").addEventListener("click",async()=>{
+  await idbClear();
+  $("clearSaved").style.display="none";
+  $("embedStatus").textContent="브라우저에 저장된 인덱스를 지웠습니다.";
+  $("embedStatus").className="note st-muted";
+});
+
+/* ---- 페이지 열 때: 저장된 인덱스가 있으면 자동 복원 ---- */
+(async()=>{
+  const saved=await idbLoad();
+  if (saved && saved.items && saved.items.length){
+    applyIndex(saved, "이전 인덱스 자동 복원");
+    $("clearSaved").style.display="";
+  }
+})();
 </script>
 </body>
 </html>
