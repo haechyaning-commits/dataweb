@@ -547,16 +547,27 @@ function groupByDocument(qvec, query){
   return Object.values(best).sort((a,b)=>b.score-a.score);
 }
 
-// 원점수(코사인)를 "관련도 %"로 보정. 이 검색어에 대한 전체 문서의 기준선(중앙값)을
-// 빼서, 두드러지게 높은 문서만 높은 %가 되게 한다 → 관련 없으면 0%에 가까움.
-// 관련도 %는 코사인의 "절대 구간"으로 매핑한다(중앙값 기준 아님).
-//  e5 모델은 같은 한국어끼리면 주제가 전혀 달라도 코사인이 0.75~0.82대로 높다.
-//  "중앙값보다 튀는 정도"로 %를 매기면, 코퍼스에 없는 주제(예: 집단따돌림)를 검색해도
-//  흔한 단어 몇 개만 겹친 문서가 '튀어서' 70%로 표시된다 → 거짓 관련도.
-//  그래서 REL_LOW 이하는 0%(사실상 무관), REL_HIGH 이상만 100%로 본다.
+// ===== 관련도 % = 코사인(의미) × 검색어 커버리지(실제 단어 출현) =====
+// 왜 코사인만으로 안 되나: e5 모델은 같은 한국어끼리면 주제가 전혀 달라도 코사인이
+// 0.80대로 높게 나온다. 그래서 코퍼스에 없는 주제(예: "집단따돌림")를 검색해도, 흔한
+// 단어 몇 개만 겹친 문서가 높게 표시됐다("그냥 겹치는 단어만 몇 개"의 정체).
+// 해결: 검색어의 핵심 단어가 그 문서에 실제로 얼마나 나오는지(coverage)를 곱한다.
+// 검색어 단어가 문서에 거의 없으면 코사인이 높아도 관련도는 낮게 나온다.
 const REL_LOW=0.80, REL_HIGH=0.87;
-const matchPct = cos =>
-  Math.round(Math.max(0, Math.min(1, (cos-REL_LOW)/(REL_HIGH-REL_LOW)))*100);
+// 검색어 토큰(불용어 제외, 한글 bigram 포함 → 조사 차이 흡수) 중 문서에 실제로 있는 비율.
+function queryCoverage(query, docText){
+  const q=new Set(tokenizeKo(query));
+  if (!q.size) return 1;
+  const d=new Set(tokenizeKo(docText||""));
+  let hit=0; for (const w of q) if (d.has(w)) hit++;
+  return hit/q.size;
+}
+// 코사인을 절대구간으로 0~1 매핑한 뒤, 커버리지로 할인한다.
+function relatedness(cos, coverage){
+  const relCos=Math.max(0, Math.min(1, (cos-REL_LOW)/(REL_HIGH-REL_LOW)));
+  return relCos*(0.2+0.8*coverage);
+}
+const matchPct = (cos, coverage) => Math.round(relatedness(cos, coverage)*100);
 
 async function runSearch(){
   const q=$("q").value.trim(); if (!q || !index.length) return;
@@ -572,25 +583,30 @@ async function runSearch(){
     box.insertAdjacentHTML("beforeend",
       '<p class="note" style="margin:4px 0 10px">💡 문서 <b>한 개당 한 줄</b>로 정리했습니다(가장 관련 높은 구간 기준). '
       + '순위는 <b>임베딩 + 키워드(BM25) 하이브리드</b>로 매깁니다. '
-      + '<b>관련도 %</b>는 검색어와의 관련 정도를 보정한 값으로, <b>관련이 없으면 0%</b>에 가깝습니다. '
+      + '<b>관련도 %</b>는 의미 유사도와 <b>검색어 단어가 문서에 실제로 나오는 정도</b>를 함께 반영합니다. '
+      + '검색어가 문서에 거의 없으면 <b>관련도가 낮게</b> 나옵니다. '
       + '<mark>노란색</mark>은 검색어 위치, 오른쪽 <b>▸</b>는 본문 전체 보기입니다.</p>');
-    // 최고 관련도가 낮으면 "뚜렷한 일치 없음" 안내 (절대 코사인 기준이라 정직함)
-    if (matchPct(all[0].cos) < 30){
+    // 최상위 문서조차 검색어 단어가 거의 없으면 "관련 문서 없음"을 정직하게 알린다.
+    const topFull=(docTexts[all[0].it.source]||all[0].it.text);
+    const topCov=queryCoverage(q, topFull);
+    if (matchPct(all[0].cos, topCov) < 30 || topCov < 0.34){
       box.insertAdjacentHTML("beforeend",
         '<p class="note st-warn" style="margin:0 0 10px">🔸 검색어와 뚜렷하게 일치하는 문서가 없습니다 '
-        + '(가장 가까운 문서도 관련도가 낮음). 겹치는 단어 몇 개로 올라온 결과일 수 있으니 실제 관련 여부를 확인하세요.</p>');
+        + '— 검색어의 핵심 단어가 문서에 거의 나오지 않습니다. 겹치는 단어 몇 개로 올라온 결과일 수 있으니 '
+        + '실제 관련 여부를 직접 확인하세요.</p>');
     }
     ranked.forEach((r,i)=>{
       const it=r.it;
       const chunkLabel = it.nChunks>1 ? `관련 구간 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
-      const pct=matchPct(r.cos);
       const full=(docTexts[it.source]||it.text);
+      const cov=queryCoverage(q, full);
+      const pct=matchPct(r.cos, cov);
       const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
       const div=document.createElement("div"); div.className="res";
       div.innerHTML=
         `<h4><span class="rtitle"><button class="toggle" aria-label="펼치기">▸</button>`
         + `<b>[${i+1}] ${esc(it.source)}</b> <span class="chip" title="문서 안에서 검색어와 가장 관련 높은 구간입니다">${chunkLabel}</span></span>`
-        + `<span class="score" title="코사인 ${(r.cos*100).toFixed(1)}% · 하이브리드 순위점수 ${r.score.toFixed(3)}">관련도 ${pct}%</span></h4>`
+        + `<span class="score" title="코사인 ${(r.cos*100).toFixed(1)}% · 검색어 커버리지 ${Math.round(cov*100)}% · 하이브리드 순위점수 ${r.score.toFixed(3)}">관련도 ${pct}%</span></h4>`
         + `<p class="preview">${highlight(preview,q)}</p>`
         + `<div class="fulltext" style="display:none">${highlight(full,q)}</div>`;
       const btn=div.querySelector(".toggle");
