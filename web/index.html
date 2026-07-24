@@ -74,8 +74,14 @@
     <div class="row" style="justify-content:space-between">
       <div>
         <div class="step">임베딩 모델</div>
-        <div id="modelName">Xenova/multilingual-e5-small (다국어·한국어)</div>
-        <div id="modelStatus" class="note st-muted">아직 로드되지 않음 — 임베딩 시작 시 자동으로 내려받아 브라우저에 캐시됩니다(최초 1회, 인터넷 필요).</div>
+        <div class="row" style="gap:8px;align-items:center;margin-bottom:6px">
+          <select id="modelSel">
+            <option value="Xenova/multilingual-e5-small">e5-small — 빠름 · 품질 낮음 (~120MB)</option>
+            <option value="Xenova/multilingual-e5-base" selected>e5-base — 권장 · 균형 (~280MB)</option>
+            <option value="Xenova/multilingual-e5-large">e5-large — 품질 최고 · 느림 (~1.2GB)</option>
+          </select>
+        </div>
+        <div id="modelStatus" class="note st-muted">큰 모델일수록 의미 이해가 좋지만 다운로드·속도 부담이 큽니다. 모델을 바꾸면 <b>다시 임베딩</b>해야 합니다. 임베딩 시작 시 자동으로 내려받아 브라우저에 캐시됩니다(최초 1회, 인터넷 필요).</div>
       </div>
     </div>
     <div class="bar" id="modelBarWrap" style="display:none"><i id="modelBar"></i></div>
@@ -359,22 +365,28 @@ function chunkText(text, size=1200, overlap=200){
 }
 
 /* ================= 임베딩 모델 ================= */
+let loadedModel = null;  // 현재 로드된 모델 id (바뀌면 다시 로드)
+function selectedModel(){ return $("modelSel").value; }
 async function ensureModel(){
-  if (extractor) return;
+  const want = selectedModel();
+  if (extractor && loadedModel === want) return;
+  extractor = null;
   $("modelBarWrap").style.display="block";
-  $("modelStatus").textContent="모델을 내려받는 중… (최초 1회, 약 100MB)";
+  $("modelBar").style.width="0%";
+  $("modelStatus").textContent=`${want} 내려받는 중… (최초 1회, 캐시됨)`;
   $("modelStatus").className="note st-warn";
   const { pipeline, env } = await import("https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2");
   env.allowLocalModels=false;
-  extractor = await pipeline("feature-extraction","Xenova/multilingual-e5-small",{
+  extractor = await pipeline("feature-extraction", want, {
     progress_callback:(p)=>{
       if (p && p.status==="progress" && p.total){
         $("modelBar").style.width=Math.round(100*p.loaded/p.total)+"%";
       }
     }
   });
+  loadedModel = want;
   $("modelBar").style.width="100%";
-  $("modelStatus").textContent="모델 준비 완료 ✓ (이후에는 캐시에서 즉시 로드)";
+  $("modelStatus").textContent=`모델 준비 완료 ✓ ${want} (이후에는 캐시에서 즉시 로드)`;
   $("modelStatus").className="note st-ok";
 }
 async function embed(text, isQuery){
@@ -629,9 +641,19 @@ async function runSearch(){
 $("searchBtn").addEventListener("click",runSearch);
 $("q").addEventListener("keydown",e=>{ if (e.key==="Enter") runSearch(); });
 
+/* ---- 모델 변경: 기존 임베딩은 다른 모델 벡터라 무효 → 재임베딩 유도 ---- */
+$("modelSel").addEventListener("change",()=>{
+  if (index.length){
+    index=[]; rebuildBM25(); $("searchBtn").disabled=true; $("saveIndex").disabled=true;
+    $("results").innerHTML="";
+    $("embedStatus").textContent="모델이 바뀌었습니다. '임베딩 시작'을 다시 눌러 주세요.";
+    $("embedStatus").className="note st-warn";
+  }
+});
+
 /* ---- 인덱스 저장/불러오기 ---- */
 $("saveIndex").addEventListener("click",()=>{
-  const data={model:"Xenova/multilingual-e5-small", docTexts,
+  const data={model:loadedModel||selectedModel(), docTexts,
     items:index.map(it=>({source:it.source,chunk:it.chunk,nChunks:it.nChunks,text:it.text,vector:Array.from(it.vector)}))};
   const blob=new Blob([JSON.stringify(data)],{type:"application/json"});
   const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
@@ -644,8 +666,12 @@ $("indexFile").addEventListener("change",async e=>{
   index=data.items.map(it=>({...it,vector:Float32Array.from(it.vector)}));
   rebuildBM25();  // loaded a different index → invalidate keyword stats
   docTexts=data.docTexts||{};
+  // 인덱스는 특정 모델로 만든 벡터다. 질의도 같은 모델로 임베딩해야 하므로 셀렉터를 맞춘다.
+  if (data.model && [...$("modelSel").options].some(o=>o.value===data.model)){
+    $("modelSel").value=data.model; loadedModel=null; extractor=null;
+  }
   $("searchBtn").disabled=false; $("saveIndex").disabled=false;
-  $("embedStatus").textContent=`인덱스 불러옴 ✓ ${index.length}개 조각. 바로 검색할 수 있습니다.`;
+  $("embedStatus").textContent=`인덱스 불러옴 ✓ ${index.length}개 조각 (모델: ${data.model||"?"}). 바로 검색할 수 있습니다.`;
   $("embedStatus").className="note st-ok";
 });
 </script>
