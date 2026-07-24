@@ -505,13 +505,15 @@ function groupByDocument(qvec){
   return Object.values(best).sort((a,b)=>b.score-a.score);
 }
 
-// 원점수(코사인)를 "관련도 %"로 보정. 이 검색어에 대한 전체 문서의 기준선(중앙값)을
-// 빼서, 두드러지게 높은 문서만 높은 %가 되게 한다 → 관련 없으면 0%에 가까움.
-const MATCH_MARGIN=0.12; // 기준선보다 이만큼 높으면 관련도 100%
-function median(arr){
-  const b=[...arr].sort((x,y)=>x-y); const m=b.length>>1;
-  return b.length ? (b.length%2 ? b[m] : (b[m-1]+b[m])/2) : 0;
-}
+// 원점수(코사인)를 "관련도 %"로 보정 — 고정범위 방식.
+// 브라우저 검색은 항상 e5-small(질의 임베딩)이므로, 이 모델이 실제로 내는
+// 코사인 범위를 0~100%로 곧바로 매핑한다. 중앙값을 빼지 않으므로 감사문서처럼
+// 주제가 비슷한 코퍼스에서도 키워드/문맥 매칭이 정직하게 높은 %로 나온다.
+//   REL_LO 이하 → 0%,  REL_HI 이상 → 100%,  그 사이는 선형.
+const REL_LO=0.75;   // 이 코사인 이하는 사실상 무관
+const REL_HI=0.88;   // 이 코사인 이상은 뚜렷한 일치
+const WEAK_FLOOR=0.78; // 최고 코사인이 이보다 낮으면 "뚜렷한 일치 없음" 경고(절대 기준)
+const relPct = s => Math.round(Math.max(0,Math.min(1,(s-REL_LO)/(REL_HI-REL_LO)))*100);
 
 /* ===== 유사 지적사항(문서-문서 유사도) ===== */
 // 문서마다 조각 벡터의 평균을 L2 정규화한 "문서 대표 벡터"를 만든다.
@@ -575,17 +577,17 @@ async function runSearch(){
       return;
     }
     const all=groupByDocument(qvec);                 // 전체 문서(정렬됨)
-    const baseline = all.length>=3 ? median(all.map(r=>r.score)) : 0.75;
-    const matchPct = s => Math.round(Math.max(0,Math.min(1,(s-baseline)/MATCH_MARGIN))*100);
     const ranked=all.slice(0,parseInt($("topk").value,10));
     const box=$("results"); box.innerHTML="";
     if (!ranked.length){ box.innerHTML='<p class="note">검색 결과가 없습니다.</p>'; return; }
     box.insertAdjacentHTML("beforeend",
       '<p class="note" style="margin:4px 0 10px">💡 문서 <b>한 개당 한 줄</b>로 정리했습니다(가장 관련 높은 구간 기준). '
-      + '<b>관련도 %</b>는 검색어와의 관련 정도를 보정한 값으로, <b>관련이 없으면 0%</b>에 가깝습니다. '
+      + '<b>관련도 %</b>는 모델의 실제 유사도(코사인)를 고정범위로 환산한 값입니다'
+      + '(점수에 올리면 원점수 표시). 글자가 겹치지 않아도 <b>의미가 비슷하면</b> 높게 나옵니다. '
       + '<mark>노란색</mark>은 검색어 위치, 오른쪽 <b>▸</b>는 본문 전체 보기입니다.</p>');
-    // 최고 관련도가 낮으면 "뚜렷한 일치 없음" 안내
-    if (matchPct(all[0].score) < 15){
+    // 최고 코사인이 절대 기준(WEAK_FLOOR) 미만이면 "뚜렷한 일치 없음" 안내.
+    // (중앙값이 아닌 절대값 기준이라, 좋은 문맥 매칭을 잘못 경고하지 않는다)
+    if (all[0].score < WEAK_FLOOR){
       box.insertAdjacentHTML("beforeend",
         '<p class="note st-warn" style="margin:0 0 10px">🔸 뚜렷하게 일치하는 문서가 없어 보입니다 '
         + '(관련도가 모두 낮음). 검색어와 실제로 관련된 문서가 없을 수 있습니다.</p>');
@@ -594,7 +596,7 @@ async function runSearch(){
     ranked.forEach((r,i)=>{
       const it=r.it;
       const chunkLabel = it.nChunks>1 ? `관련 구간 ${it.chunk+1}/${it.nChunks}` : "전체 문서";
-      const pct=matchPct(r.score);
+      const pct=relPct(r.score);
       const full=(docTexts[it.source]||it.text);
       const preview=it.text.length>220?it.text.slice(0,220)+"…":it.text;
       // 이 문서와 비슷한 과거 지적/처분 문서(반복·유사 사례). 검색어와 무관.
