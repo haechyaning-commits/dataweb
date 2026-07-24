@@ -595,24 +595,30 @@ function fullTextFor(source){
     .sort((a,b)=>a.chunk-b.chunk).map(it=>it.text);
   return parts.join("\n") || source;
 }
-// src 문서와 다른 문서들 간, "가장 닮은 조각 쌍"의 코사인으로 순위를 매겨 상위 k개.
-// evidence: 상대 문서에서 가장 닮은 조각(근거 구간)을 함께 돌려준다.
+// src 문서와 다른 문서들 간 유사도를 "가장 닮은 조각쌍 상위 3개의 평균"으로 판정.
+// 단일 최대값은 우연히 한 문장만 겹쳐도 높게 나오므로, 상위 3쌍을 평균내 더 안정적으로
+// "여러 대목이 겹치는" 문서를 위로 올린다. evidence 는 가장 닮은 조각(근거 구간).
+const SIM_TOPN = 3;  // 평균낼 조각쌍 개수
 function topSimilarByChunk(docChunks, src, k){
   const mine=docChunks[src]||[];
   const out=[];
   for (const o in docChunks){
     if (o===src || !mine.length) continue;
-    let best=-1, bestOther=null;
+    const pairs=[]; let bestOther=null, best=-Infinity;
     for (const b of docChunks[o]){
       const vb=b.vector;
       for (const a of mine){
         const va=a.vector; let dot=0;
         const n=Math.min(va.length, vb.length);
         for (let i=0;i<n;i++) dot+=va[i]*vb[i];
+        pairs.push(dot);
         if (dot>best){ best=dot; bestOther=b; }
       }
     }
-    out.push({source:o, score:best, evidence:bestOther});
+    pairs.sort((x,y)=>y-x);
+    const topn=pairs.slice(0, SIM_TOPN);
+    const score=topn.reduce((s,x)=>s+x,0)/topn.length;  // 상위 3쌍(부족하면 있는 만큼) 평균
+    out.push({source:o, score, evidence:bestOther});
   }
   return out.sort((a,b)=>b.score-a.score).slice(0,k);
 }
